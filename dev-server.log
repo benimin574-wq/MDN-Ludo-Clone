@@ -1,0 +1,4 @@
+
+> mensch-aergere-dich-nicht@0.1.0 dev
+> concurrently -n server,client -c red,green "npm run dev:server" "npm run dev:client"
+

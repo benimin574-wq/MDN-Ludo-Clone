@@ -1,0 +1,8 @@
+Error: listen EADDRINUSE: address already in use :::2567
+    at Server.setupListenHandle [as _listen2] (node:net:1940:16)
+    at listenInCluster (node:net:1997:12)
+    at Server.listen (node:net:2102:7)
+    at WebSocketTransport.listen (file:///C:/Users/Admin/Documents/Codex/Projekte/Menschargednd/node_modules/@colyseus/ws-transport/build/WebSocketTransport.mjs:53:17)
+    at file:///C:/Users/Admin/Documents/Codex/Projekte/Menschargednd/node_modules/@colyseus/core/build/Server.mjs:86:22
+    at new Promise (<anonymous>)
+    at Server.listen (file:///C:/Users/Admin/Documents/Codex/Projekte/Menschargednd/node_modules/@colyseus/core/build/Server.mjs:84:12)
