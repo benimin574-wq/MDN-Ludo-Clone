@@ -3,8 +3,7 @@ export interface ChatFilterRule {
   pattern: RegExp;
 }
 
-// Neue Chatfilter-Regeln hier ergaenzen.
-// Nutze bewusst Regex, damit auch getrennte Schreibweisen wie "f u c k" erkannt werden.
+// Könnt noch welche hinzufügen
 export const CHAT_FILTER_RULES: ChatFilterRule[] = [
   { label: "arsch", pattern: /a[\W_]*r[\W_]*s[\W_]*c[\W_]*h(?:[\W_]*l[\W_]*o[\W_]*c[\W_]*h)?/giu },
   { label: "bastard", pattern: /b[\W_]*a[\W_]*s[\W_]*t[\W_]*a[\W_]*r[\W_]*d/giu },
