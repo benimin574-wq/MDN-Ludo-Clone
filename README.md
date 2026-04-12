@@ -240,9 +240,4 @@ Maximal 4 Spieler oder Bots zusammen.
 * Die UI darf gültige Züge anzeigen, aber nie die Quelle der Wahrheit sein
 * Bei neuen sichtbaren Features diese README aktualisieren
 
-## Repository
-
-`https://github.com/benimin574-wq/MDN-Mensch-rgere-dich-nicht`
-
-```
-```
+* 
