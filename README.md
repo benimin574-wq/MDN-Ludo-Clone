@@ -1,7 +1,13 @@
 ````md
-# Mensch ärgere dich nicht
+# Ludo Clone
 
-Browser-Spiel mit React-Client, Colyseus-Server und gemeinsamer Regel-Logik in TypeScript.
+Unabhängiges Browser-Spiel, inspiriert von klassischen Cross-and-Circle-Brettspielen.
+
+## Rechtlicher Hinweis
+
+Dieses Projekt ist ein unabhängiges Fan- bzw. Klonprojekt und steht in keiner Verbindung zu Schmidt Spiele GmbH.
+„Mensch ärgere Dich nicht“ ist eine Marke des jeweiligen Rechteinhabers.
+Dieses Repository beansprucht keinerlei Rechte an fremden Marken, Namen, Logos oder Originalgrafiken.
 
 ## Überblick
 
@@ -240,4 +246,3 @@ Maximal 4 Spieler oder Bots zusammen.
 * Die UI darf gültige Züge anzeigen, aber nie die Quelle der Wahrheit sein
 * Bei neuen sichtbaren Features diese README aktualisieren
 
-* 
