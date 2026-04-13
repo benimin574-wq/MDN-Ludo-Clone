@@ -53,6 +53,8 @@ export interface GameStateSnapshot {
   legalMoves: MoveOption[];
   winnerColor: PlayerColor | "";
   lastEvent: string;
+  turnStartedAt: number;
+  turnDeadlineAt: number;
   settings: GameSettings;
   chat: ChatMessage[];
   updatedAt: number;

@@ -50,6 +50,8 @@ export class MenschState extends Schema {
   @type([MoveOptionModel]) legalMoves = new ArraySchema<MoveOptionModel>();
   @type("string") winnerColor = "";
   @type("string") lastEvent = "";
+  @type("number") turnStartedAt = 0;
+  @type("number") turnDeadlineAt = 0;
   @type(SettingsModel) settings = new SettingsModel();
   @type([ChatMessageModel]) chat = new ArraySchema<ChatMessageModel>();
   @type("number") updatedAt = 0;
@@ -86,6 +88,8 @@ export function schemaToSnapshot(state: MenschState): GameStateSnapshot {
     })),
     winnerColor: state.winnerColor as GameStateSnapshot["winnerColor"],
     lastEvent: state.lastEvent,
+    turnStartedAt: state.turnStartedAt,
+    turnDeadlineAt: state.turnDeadlineAt,
     settings: {
       strikeRequired: state.settings.strikeRequired,
       chatFilterEnabled: state.settings.chatFilterEnabled,
@@ -111,6 +115,8 @@ export function snapshotToSchema(snapshot: GameStateSnapshot, state: MenschState
   state.rollAttempts = snapshot.rollAttempts;
   state.winnerColor = snapshot.winnerColor;
   state.lastEvent = snapshot.lastEvent;
+  state.turnStartedAt = snapshot.turnStartedAt;
+  state.turnDeadlineAt = snapshot.turnDeadlineAt;
   state.settings.strikeRequired = snapshot.settings.strikeRequired;
   state.settings.chatFilterEnabled = snapshot.settings.chatFilterEnabled;
   state.updatedAt = snapshot.updatedAt;

@@ -1,7 +1,8 @@
+import { randomInt } from "node:crypto";
 import type { Client } from "@colyseus/core";
 import { Room } from "@colyseus/core";
-import { filterChatText } from "../../../shared/src/chatFilter";
-import { COLOR_META, PLAYER_COLORS } from "../../../shared/src/constants";
+import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../../shared/src/chatFilter";
+import { COLOR_META, PLAYER_COLORS, TURN_TIME_LIMIT_MS } from "../../../shared/src/constants";
 import {
   advanceToNextPlayer,
   applyMove,
@@ -31,8 +32,15 @@ interface ChatStats {
   warnings: number;
 }
 
+interface ChatReportPayload {
+  messageId?: string;
+  word?: string;
+}
+
 const CHAT_WINDOW_MS = 8000;
 const CHAT_MESSAGE_LIMIT = 5;
+const BOT_STEP_DELAY_MS = 700;
+const HUMAN_AUTO_STEP_DELAY_MS = 520;
 
 export class MenschRoom extends Room<{ state: MenschState }> {
   private hostId = "";
@@ -40,6 +48,9 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private readonly tokenByPlayerId = new Map<string, string>();
   private readonly kickedPlayerIds = new Set<string>();
   private readonly chatStats = new Map<string, ChatStats>();
+  private readonly reportedFilterTerms = new Set<string>();
+  private automationTimeout: { clear: () => void } | null = null;
+  private autoPlayPlayerId = "";
 
   onCreate(options: JoinOptions): void {
     this.maxClients = 4;
@@ -71,6 +82,9 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     this.onMessage("sendChat", (client, message: { text?: string }) => {
       this.handleChat(client, String(message.text || ""));
     });
+    this.onMessage("reportChatWord", (client, message: ChatReportPayload) => {
+      this.handleChatReport(client, message);
+    });
     this.onMessage("requestRematch", (client) => {
       this.handleRematch(client);
     });
@@ -87,7 +101,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       snapshot.updatedAt = Date.now();
       snapshotToSchema(snapshot, this.state);
       this.sendSessionInfo(client, reconnectToken);
-      this.scheduleBotTurn();
+      this.scheduleTurnAutomation();
       return;
     }
 
@@ -169,6 +183,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       const active = getActivePlayer(snapshot);
       if (active?.id === client.sessionId && snapshot.status === "playing") {
         snapshot = advanceToNextPlayer(snapshot);
+        this.startTurnWindow(snapshot);
         const nextPlayer = getActivePlayer(snapshot);
         snapshot.lastEvent = `${player.name} ist disconnected. ${nextPlayer?.name || "Niemand"} ist dran.`;
       }
@@ -176,7 +191,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
-    this.scheduleBotTurn();
+    this.scheduleTurnAutomation();
   }
 
   private handleReady(client: Client, ready: boolean): void {
@@ -294,6 +309,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
+    this.cancelAutoPlayFor(client.sessionId);
     this.rollForActivePlayer();
   }
 
@@ -306,6 +322,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
+    this.cancelAutoPlayFor(client.sessionId);
     this.moveActivePiece(pieceId);
   }
 
@@ -331,6 +348,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       this.sendError(client, "Du wurdest wegen Chat-Spam aus dem Raum entfernt.");
       this.removePlayerForModeration(snapshot, player, `${player.name} wurde wegen Chat-Spam entfernt.`);
       snapshotToSchema(snapshot, this.state);
+      this.scheduleTurnAutomation();
       return;
     }
 
@@ -338,10 +356,47 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       id: createId("chat"),
       playerName: player.name,
       color: player.color,
-      text: snapshot.settings.chatFilterEnabled ? filterChatText(text) : text,
+      text: this.filterChatForRoom(text, snapshot),
       createdAt: Date.now(),
     });
     trimChat(snapshot);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+  }
+
+  private handleChatReport(client: Client, message: ChatReportPayload): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const reporter = snapshot.players.find((entry) => entry.id === client.sessionId);
+    if (!reporter) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return;
+    }
+
+    const messageId = String(message.messageId || "").trim().slice(0, 80);
+    const normalizedTerm = normalizeReportedFilterTerm(String(message.word || ""));
+    if (!messageId || !normalizedTerm) {
+      this.sendError(client, "Bitte ein Wort aus der Nachricht eintragen.");
+      return;
+    }
+
+    const targetMessage = snapshot.chat.find((entry) => entry.id === messageId && entry.color !== "system");
+    if (!targetMessage) {
+      this.sendError(client, "Diese Nachricht kann nicht gemeldet werden.");
+      return;
+    }
+
+    if (!isReportTermInText(targetMessage.text, normalizedTerm)) {
+      this.sendError(client, "Dieses Wort wurde in der Nachricht nicht gefunden.");
+      return;
+    }
+
+    const wasKnown = this.reportedFilterTerms.has(normalizedTerm);
+    this.reportedFilterTerms.add(normalizedTerm);
+    this.applyActiveChatFilter(snapshot);
+    snapshot.lastEvent = wasKnown
+      ? "Der gemeldete Begriff war bereits im Chat-Filter."
+      : "Ein gemeldeter Begriff wurde zur Filterliste hinzugefuegt.";
+    addSystemMessage(snapshot, snapshot.lastEvent);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
   }
@@ -355,6 +410,8 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     }
 
     const rematch = resetForRematch(snapshot);
+    this.clearTurnWindow(rematch);
+    this.applyActiveChatFilter(rematch);
     addSystemMessage(rematch, `${player.name} hat eine Revanche gestartet.`);
     snapshotToSchema(rematch, this.state);
   }
@@ -401,9 +458,10 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     snapshot.winnerColor = "";
     snapshot.lastEvent = `${getActivePlayer(snapshot)?.name || "Ein Spieler"} beginnt.`;
     addSystemMessage(snapshot, "Das Spiel startet.");
+    this.startTurnWindow(snapshot);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
-    this.scheduleBotTurn();
+    this.scheduleTurnAutomation();
   }
 
   private rollForActivePlayer(): void {
@@ -441,9 +499,10 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       snapshot.lastEvent = `${activePlayer.name} würfelt ${dice}.`;
     }
 
+    this.keepOrStartTurnWindow(snapshot, activePlayer.id);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
-    this.scheduleBotTurn();
+    this.scheduleTurnAutomation();
   }
 
   private moveActivePiece(pieceId: string): void {
@@ -465,6 +524,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     if (snapshot.status === "finished") {
       snapshot.lastEvent = `${activePlayer.name} zieht${captureText} und gewinnt.`;
       addSystemMessage(snapshot, snapshot.lastEvent);
+      this.clearTurnWindow(snapshot);
       snapshotToSchema(snapshot, this.state);
       return;
     }
@@ -481,36 +541,139 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       snapshot.lastEvent = `${event} ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
     }
 
+    this.keepOrStartTurnWindow(snapshot, activePlayer.id);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
-    this.scheduleBotTurn();
+    this.scheduleTurnAutomation();
   }
 
-  private scheduleBotTurn(): void {
+  private scheduleTurnAutomation(): void {
+    this.clearAutomationTimeout();
+
     const snapshot = schemaToSnapshot(this.state);
     const activePlayer = getActivePlayer(snapshot);
 
-    if (snapshot.status !== "playing" || !activePlayer?.isBot) {
+    if (snapshot.status !== "playing" || !activePlayer) {
+      this.autoPlayPlayerId = "";
       return;
     }
 
-    this.clock.setTimeout(() => {
-      const current = schemaToSnapshot(this.state);
-      const bot = getActivePlayer(current);
-      if (current.status !== "playing" || !bot?.isBot) {
-        return;
-      }
+    if (this.autoPlayPlayerId && this.autoPlayPlayerId !== activePlayer.id) {
+      this.autoPlayPlayerId = "";
+    }
 
-      if (!current.diceRolled) {
-        this.rollForActivePlayer();
-        return;
-      }
+    if (activePlayer.isBot || this.autoPlayPlayerId === activePlayer.id) {
+      const delay = activePlayer.isBot ? BOT_STEP_DELAY_MS : HUMAN_AUTO_STEP_DELAY_MS;
+      this.automationTimeout = this.clock.setTimeout(() => {
+        this.playAutomatedStep(activePlayer.id, activePlayer.isBot ? "bot" : "timeout");
+      }, delay);
+      return;
+    }
 
-      const move = chooseBotMove(current);
-      if (move) {
-        this.moveActivePiece(move.pieceId);
-      }
-    }, 700);
+    const delay = Math.max(0, (snapshot.turnDeadlineAt || Date.now()) - Date.now());
+    this.automationTimeout = this.clock.setTimeout(() => {
+      this.startHumanAutoPlay(activePlayer.id);
+    }, delay);
+  }
+
+  private startHumanAutoPlay(playerId: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const activePlayer = getActivePlayer(snapshot);
+
+    if (
+      snapshot.status !== "playing" ||
+      !activePlayer ||
+      activePlayer.id !== playerId ||
+      activePlayer.isBot ||
+      Date.now() < snapshot.turnDeadlineAt
+    ) {
+      this.scheduleTurnAutomation();
+      return;
+    }
+
+    this.autoPlayPlayerId = playerId;
+    addSystemMessage(snapshot, `${activePlayer.name} ist nicht rechtzeitig dran. Der Computer spielt diesen Zug.`);
+    snapshot.lastEvent = `${activePlayer.name} ist nicht rechtzeitig dran. Der Computer übernimmt kurz.`;
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+  }
+
+  private playAutomatedStep(playerId: string, reason: "bot" | "timeout"): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const activePlayer = getActivePlayer(snapshot);
+
+    if (snapshot.status !== "playing" || !activePlayer || activePlayer.id !== playerId) {
+      this.scheduleTurnAutomation();
+      return;
+    }
+
+    if (reason === "timeout" && this.autoPlayPlayerId !== playerId) {
+      this.scheduleTurnAutomation();
+      return;
+    }
+
+    if (!snapshot.diceRolled) {
+      this.rollForActivePlayer();
+      return;
+    }
+
+    const move = chooseBotMove(snapshot);
+    if (move) {
+      this.moveActivePiece(move.pieceId);
+      return;
+    }
+
+    this.scheduleTurnAutomation();
+  }
+
+  private startTurnWindow(snapshot: GameStateSnapshot): void {
+    if (snapshot.status !== "playing") {
+      this.clearTurnWindow(snapshot);
+      return;
+    }
+
+    const activePlayer = getActivePlayer(snapshot);
+    if (!activePlayer) {
+      this.clearTurnWindow(snapshot);
+      return;
+    }
+
+    const now = Date.now();
+    snapshot.turnStartedAt = now;
+    snapshot.turnDeadlineAt = now + TURN_TIME_LIMIT_MS;
+  }
+
+  private keepOrStartTurnWindow(snapshot: GameStateSnapshot, previousPlayerId: string): void {
+    const activePlayer = getActivePlayer(snapshot);
+    const samePlayerStillActive = Boolean(
+      activePlayer &&
+      activePlayer.id === previousPlayerId &&
+      snapshot.turnStartedAt &&
+      snapshot.turnDeadlineAt,
+    );
+
+    if (!samePlayerStillActive) {
+      this.startTurnWindow(snapshot);
+    }
+  }
+
+  private clearTurnWindow(snapshot: GameStateSnapshot): void {
+    snapshot.turnStartedAt = 0;
+    snapshot.turnDeadlineAt = 0;
+    this.autoPlayPlayerId = "";
+    this.clearAutomationTimeout();
+  }
+
+  private clearAutomationTimeout(): void {
+    this.automationTimeout?.clear();
+    this.automationTimeout = null;
+  }
+
+  private cancelAutoPlayFor(playerId: string): void {
+    if (this.autoPlayPlayerId === playerId) {
+      this.autoPlayPlayerId = "";
+    }
   }
 
   private addBotsToSnapshot(snapshot: GameStateSnapshot, amount: number): boolean {
@@ -573,6 +736,31 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     return true;
   }
 
+  private filterChatForRoom(text: string, snapshot: GameStateSnapshot): string {
+    if (!snapshot.settings.chatFilterEnabled) {
+      return text;
+    }
+
+    return filterChatText(text, { extraPhrases: [...this.reportedFilterTerms] });
+  }
+
+  private applyActiveChatFilter(snapshot: GameStateSnapshot): void {
+    if (!snapshot.settings.chatFilterEnabled) {
+      return;
+    }
+
+    snapshot.chat = snapshot.chat.map((message) => {
+      if (message.color === "system") {
+        return message;
+      }
+
+      return {
+        ...message,
+        text: this.filterChatForRoom(message.text, snapshot),
+      };
+    });
+  }
+
   private sendSessionInfo(client: Client, reconnectToken: string): void {
     this.clock.setTimeout(() => {
       client.send("sessionInfo", {
@@ -619,6 +807,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
         snapshot.currentPlayerIndex = currentIndex < 0 ? snapshot.currentPlayerIndex : currentIndex;
         const nextSnapshot = advanceToNextPlayer(snapshot);
         Object.assign(snapshot, nextSnapshot);
+        this.startTurnWindow(snapshot);
       }
       snapshot.updatedAt = Date.now();
     }
@@ -752,7 +941,7 @@ function createId(prefix: string): string {
 }
 
 function rollDiceValue(): number {
-  return Math.floor(Math.random() * 6) + 1;
+  return randomInt(1, 7);
 }
 
 function isPlayerColor(value: unknown): value is PlayerColor {
