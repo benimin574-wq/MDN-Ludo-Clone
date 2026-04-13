@@ -1,13 +1,14 @@
 import { randomInt } from "node:crypto";
 import { Room } from "@colyseus/core";
 import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../../shared/src/chatFilter";
-import { COLOR_META, PLAYER_COLORS, TURN_TIME_LIMIT_MS } from "../../../shared/src/constants";
+import { COLOR_META, DEFAULT_TURN_TIME_LIMIT_MS, MAX_TURN_TIME_LIMIT_MS, MIN_TURN_TIME_LIMIT_MS, PLAYER_COLORS, } from "../../../shared/src/constants";
 import { advanceToNextPlayer, applyMove, createInitialSnapshot, createPieces, getActivePlayer, getAvailableColors, getLegalMoves, resetForRematch, shouldKeepRollingAfterMiss, sortPlayersClockwise, } from "../../../shared/src/rules";
 import { MenschState, schemaToSnapshot, snapshotToSchema } from "../schema";
 const CHAT_WINDOW_MS = 8000;
 const CHAT_MESSAGE_LIMIT = 5;
 const BOT_STEP_DELAY_MS = 700;
 const HUMAN_AUTO_STEP_DELAY_MS = 520;
+const GLOBAL_REPORTED_FILTER_TERMS = new Set();
 export class MenschRoom extends Room {
     constructor() {
         super(...arguments);
@@ -16,15 +17,17 @@ export class MenschRoom extends Room {
         this.tokenByPlayerId = new Map();
         this.kickedPlayerIds = new Set();
         this.chatStats = new Map();
-        this.reportedFilterTerms = new Set();
+        this.reportedFilterTerms = GLOBAL_REPORTED_FILTER_TERMS;
         this.automationTimeout = null;
         this.autoPlayPlayerId = "";
     }
     onCreate(options) {
         this.maxClients = 4;
-        this.autoDispose = false;
+        this.autoDispose = true;
         this.setState(new MenschState());
-        snapshotToSchema(createInitialSnapshot(this.roomId, Boolean(options.strikeRequired)), this.state);
+        const initialSnapshot = createInitialSnapshot(this.roomId, Boolean(options.strikeRequired));
+        initialSnapshot.settings.turnTimeLimitMs = clampTurnTimeLimit(options.turnTimeLimitMs);
+        snapshotToSchema(initialSnapshot, this.state);
         this.onMessage("toggleReady", (client, message) => {
             this.handleReady(client, Boolean(message.ready));
         });
@@ -33,6 +36,12 @@ export class MenschRoom extends Room {
         });
         this.onMessage("setChatFilter", (client, message) => {
             this.handleChatFilter(client, Boolean(message.enabled));
+        });
+        this.onMessage("setTurnTimeLimit", (client, message) => {
+            this.handleTurnTimeLimit(client, message.turnTimeLimitMs);
+        });
+        this.onMessage("setCustomColor", (client, message) => {
+            this.handleCustomColor(client, String(message.customColor || ""));
         });
         this.onMessage("startGame", (client) => {
             this.handleStartGame(client);
@@ -89,6 +98,7 @@ export class MenschRoom extends Room {
             id: client.sessionId,
             name: playerName,
             color,
+            customColor: cleanCustomColor(options.customColor, COLOR_META[color].hex),
             ready: false,
             connected: true,
             isBot: false,
@@ -145,6 +155,9 @@ export class MenschRoom extends Room {
         snapshotToSchema(snapshot, this.state);
         this.scheduleTurnAutomation();
     }
+    onDispose() {
+        this.clearAutomationTimeout();
+    }
     handleReady(client, ready) {
         const snapshot = schemaToSnapshot(this.state);
         if (snapshot.status !== "lobby") {
@@ -190,6 +203,40 @@ export class MenschRoom extends Room {
         snapshot.settings.chatFilterEnabled = enabled;
         snapshot.lastEvent = `Chat-Filter ist ${enabled ? "aktiv" : "inaktiv"}.`;
         addSystemMessage(snapshot, snapshot.lastEvent);
+        snapshot.updatedAt = Date.now();
+        snapshotToSchema(snapshot, this.state);
+    }
+    handleTurnTimeLimit(client, rawTurnTimeLimitMs) {
+        const snapshot = schemaToSnapshot(this.state);
+        if (snapshot.status !== "lobby") {
+            this.sendError(client, "Die Zugzeit kann nur in der Lobby geändert werden.");
+            return;
+        }
+        if (!this.isHost(client, snapshot)) {
+            this.sendError(client, "Nur der Host kann die Zugzeit ändern.");
+            return;
+        }
+        const turnTimeLimitMs = clampTurnTimeLimit(rawTurnTimeLimitMs);
+        snapshot.settings.turnTimeLimitMs = turnTimeLimitMs;
+        snapshot.lastEvent = `Zugzeit auf ${Math.round(turnTimeLimitMs / 1000)} Sekunden gesetzt.`;
+        addSystemMessage(snapshot, snapshot.lastEvent);
+        snapshot.updatedAt = Date.now();
+        snapshotToSchema(snapshot, this.state);
+    }
+    handleCustomColor(client, rawCustomColor) {
+        const snapshot = schemaToSnapshot(this.state);
+        if (snapshot.status !== "lobby") {
+            this.sendError(client, "Die Spielerfarbe kann nur in der Lobby geändert werden.");
+            return;
+        }
+        const player = snapshot.players.find((entry) => entry.id === client.sessionId);
+        if (!player || player.isBot) {
+            this.sendError(client, "Spieler nicht gefunden.");
+            return;
+        }
+        player.customColor = cleanCustomColor(rawCustomColor, COLOR_META[player.color].hex);
+        player.ready = false;
+        snapshot.lastEvent = `${player.name} hat die Spielerfarbe angepasst.`;
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
     }
@@ -292,6 +339,10 @@ export class MenschRoom extends Room {
             this.sendError(client, "Spieler nicht gefunden.");
             return;
         }
+        if (!snapshot.settings.chatFilterEnabled) {
+            this.sendError(client, "Der Chat-Filter ist deaktiviert.");
+            return;
+        }
         const messageId = String(message.messageId || "").trim().slice(0, 80);
         const normalizedTerm = normalizeReportedFilterTerm(String(message.word || ""));
         if (!messageId || !normalizedTerm) {
@@ -316,6 +367,9 @@ export class MenschRoom extends Room {
         addSystemMessage(snapshot, snapshot.lastEvent);
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
+        client.send("reportAccepted", {
+            message: wasKnown ? "Report geprüft. Der Begriff war schon im Filter." : "Report angenommen. Der Begriff wird jetzt gefiltert.",
+        });
     }
     handleRematch(client) {
         const snapshot = schemaToSnapshot(this.state);
@@ -353,6 +407,7 @@ export class MenschRoom extends Room {
     startGame(snapshot) {
         snapshot.players = sortPlayersClockwise(snapshot.players).map((player) => ({
             ...player,
+            customColor: cleanCustomColor(player.customColor, COLOR_META[player.color].hex),
             pieces: createPieces(player.color),
         }));
         snapshot.status = "playing";
@@ -399,6 +454,10 @@ export class MenschRoom extends Room {
             else {
                 const event = `${activePlayer.name} würfelt ${dice}; kein Zug möglich.`;
                 snapshot = advanceToNextPlayer(snapshot);
+                snapshot.diceValue = dice;
+                snapshot.diceRolled = false;
+                snapshot.rollAttempts = 0;
+                snapshot.legalMoves = [];
                 snapshot.lastEvent = `${event} ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
             }
         }
@@ -521,8 +580,10 @@ export class MenschRoom extends Room {
             return;
         }
         const now = Date.now();
+        const turnTimeLimitMs = clampTurnTimeLimit(snapshot.settings.turnTimeLimitMs);
+        snapshot.settings.turnTimeLimitMs = turnTimeLimitMs;
         snapshot.turnStartedAt = now;
-        snapshot.turnDeadlineAt = now + TURN_TIME_LIMIT_MS;
+        snapshot.turnDeadlineAt = now + turnTimeLimitMs;
     }
     keepOrStartTurnWindow(snapshot, previousPlayerId) {
         const activePlayer = getActivePlayer(snapshot);
@@ -561,6 +622,7 @@ export class MenschRoom extends Room {
                 id: `bot-${color}`,
                 name: playerName,
                 color,
+                customColor: COLOR_META[color].hex,
                 ready: true,
                 connected: true,
                 isBot: true,
@@ -764,6 +826,24 @@ function cleanPlayerName(value) {
 }
 function cleanChatText(value) {
     return value.trim().replace(/\s+/g, " ").slice(0, 240);
+}
+function cleanCustomColor(value, fallback) {
+    const color = String(value || "").trim();
+    if (/^#[0-9a-f]{6}$/i.test(color)) {
+        return color.toLowerCase();
+    }
+    if (/^#[0-9a-f]{3}$/i.test(color)) {
+        const [, r, g, b] = color.toLowerCase();
+        return `#${r}${r}${g}${g}${b}${b}`;
+    }
+    return fallback;
+}
+function clampTurnTimeLimit(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+        return DEFAULT_TURN_TIME_LIMIT_MS;
+    }
+    return Math.min(MAX_TURN_TIME_LIMIT_MS, Math.max(MIN_TURN_TIME_LIMIT_MS, Math.round(parsed)));
 }
 function cleanToken(value) {
     return String(value || "").trim().slice(0, 80);

@@ -32,6 +32,7 @@ export class PlayerModel extends Schema {
         this.id = "";
         this.name = "";
         this.color = "";
+        this.customColor = "";
         this.ready = false;
         this.connected = true;
         this.isBot = false;
@@ -47,6 +48,9 @@ __decorate([
 __decorate([
     type("string")
 ], PlayerModel.prototype, "color", void 0);
+__decorate([
+    type("string")
+], PlayerModel.prototype, "customColor", void 0);
 __decorate([
     type("boolean")
 ], PlayerModel.prototype, "ready", void 0);
@@ -89,6 +93,7 @@ export class SettingsModel extends Schema {
         super(...arguments);
         this.strikeRequired = false;
         this.chatFilterEnabled = true;
+        this.turnTimeLimitMs = 20_000;
     }
 }
 __decorate([
@@ -97,6 +102,9 @@ __decorate([
 __decorate([
     type("boolean")
 ], SettingsModel.prototype, "chatFilterEnabled", void 0);
+__decorate([
+    type("number")
+], SettingsModel.prototype, "turnTimeLimitMs", void 0);
 export class MoveOptionModel extends Schema {
     constructor() {
         super(...arguments);
@@ -196,6 +204,7 @@ export function schemaToSnapshot(state) {
             id: player.id,
             name: player.name,
             color: player.color,
+            customColor: player.customColor,
             ready: player.ready,
             connected: player.connected,
             isBot: player.isBot,
@@ -223,6 +232,7 @@ export function schemaToSnapshot(state) {
         settings: {
             strikeRequired: state.settings.strikeRequired,
             chatFilterEnabled: state.settings.chatFilterEnabled,
+            turnTimeLimitMs: state.settings.turnTimeLimitMs,
         },
         chat: state.chat.map((message) => ({
             id: message.id,
@@ -248,12 +258,14 @@ export function snapshotToSchema(snapshot, state) {
     state.turnDeadlineAt = snapshot.turnDeadlineAt;
     state.settings.strikeRequired = snapshot.settings.strikeRequired;
     state.settings.chatFilterEnabled = snapshot.settings.chatFilterEnabled;
+    state.settings.turnTimeLimitMs = snapshot.settings.turnTimeLimitMs;
     state.updatedAt = snapshot.updatedAt;
     replaceArray(state.players, snapshot.players.map((player) => {
         const model = new PlayerModel();
         model.id = player.id;
         model.name = player.name;
         model.color = player.color;
+        model.customColor = player.customColor;
         model.ready = player.ready;
         model.connected = player.connected;
         model.isBot = player.isBot;

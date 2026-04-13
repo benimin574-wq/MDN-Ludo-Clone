@@ -1,4 +1,4 @@
-import { CLOCKWISE_COLORS, FINAL_POSITION, HOME_LENGTH, PIECES_PER_PLAYER, PLAYER_COLORS, START_INDEX, TRACK_LENGTH, } from "./constants";
+import { CLOCKWISE_COLORS, DEFAULT_TURN_TIME_LIMIT_MS, FINAL_POSITION, HOME_LENGTH, PIECES_PER_PLAYER, PLAYER_COLORS, START_INDEX, TRACK_LENGTH, } from "./constants";
 import { BASE_POSITION } from "./types";
 export function createPieces(color) {
     return Array.from({ length: PIECES_PER_PLAYER }, (_, index) => ({
@@ -23,7 +23,7 @@ export function createInitialSnapshot(roomId, strikeRequired = false) {
         lastEvent: "Lobby erstellt.",
         turnStartedAt: 0,
         turnDeadlineAt: 0,
-        settings: { strikeRequired, chatFilterEnabled: true },
+        settings: { strikeRequired, chatFilterEnabled: true, turnTimeLimitMs: DEFAULT_TURN_TIME_LIMIT_MS },
         chat: [],
         updatedAt: Date.now(),
     };
@@ -192,6 +192,7 @@ export function resetForRematch(state) {
     nextState.players = sortPlayersClockwise(nextState.players).map((player) => ({
         ...player,
         ready: player.isBot,
+        customColor: player.customColor,
         pieces: createPieces(player.color),
     }));
     nextState.currentPlayerIndex = 0;
