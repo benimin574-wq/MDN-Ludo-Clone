@@ -21,6 +21,8 @@ export function createInitialSnapshot(roomId, strikeRequired = false) {
         legalMoves: [],
         winnerColor: "",
         lastEvent: "Lobby erstellt.",
+        turnStartedAt: 0,
+        turnDeadlineAt: 0,
         settings: { strikeRequired, chatFilterEnabled: true },
         chat: [],
         updatedAt: Date.now(),
@@ -179,6 +181,8 @@ export function advanceToNextPlayer(state) {
     nextState.diceRolled = false;
     nextState.rollAttempts = 0;
     nextState.legalMoves = [];
+    nextState.turnStartedAt = 0;
+    nextState.turnDeadlineAt = 0;
     nextState.updatedAt = Date.now();
     return nextState;
 }
@@ -197,6 +201,8 @@ export function resetForRematch(state) {
     nextState.legalMoves = [];
     nextState.winnerColor = "";
     nextState.lastEvent = "Revanche vorbereitet.";
+    nextState.turnStartedAt = 0;
+    nextState.turnDeadlineAt = 0;
     nextState.updatedAt = Date.now();
     return nextState;
 }

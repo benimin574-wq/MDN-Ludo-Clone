@@ -1,10 +1,13 @@
+import { randomInt } from "node:crypto";
 import { Room } from "@colyseus/core";
-import { filterChatText } from "../../../shared/src/chatFilter";
-import { COLOR_META, PLAYER_COLORS } from "../../../shared/src/constants";
+import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../../shared/src/chatFilter";
+import { COLOR_META, PLAYER_COLORS, TURN_TIME_LIMIT_MS } from "../../../shared/src/constants";
 import { advanceToNextPlayer, applyMove, createInitialSnapshot, createPieces, getActivePlayer, getAvailableColors, getLegalMoves, resetForRematch, shouldKeepRollingAfterMiss, sortPlayersClockwise, } from "../../../shared/src/rules";
 import { MenschState, schemaToSnapshot, snapshotToSchema } from "../schema";
 const CHAT_WINDOW_MS = 8000;
 const CHAT_MESSAGE_LIMIT = 5;
+const BOT_STEP_DELAY_MS = 700;
+const HUMAN_AUTO_STEP_DELAY_MS = 520;
 export class MenschRoom extends Room {
     constructor() {
         super(...arguments);
@@ -13,6 +16,9 @@ export class MenschRoom extends Room {
         this.tokenByPlayerId = new Map();
         this.kickedPlayerIds = new Set();
         this.chatStats = new Map();
+        this.reportedFilterTerms = new Set();
+        this.automationTimeout = null;
+        this.autoPlayPlayerId = "";
     }
     onCreate(options) {
         this.maxClients = 4;
@@ -43,6 +49,9 @@ export class MenschRoom extends Room {
         this.onMessage("sendChat", (client, message) => {
             this.handleChat(client, String(message.text || ""));
         });
+        this.onMessage("reportChatWord", (client, message) => {
+            this.handleChatReport(client, message);
+        });
         this.onMessage("requestRematch", (client) => {
             this.handleRematch(client);
         });
@@ -57,7 +66,7 @@ export class MenschRoom extends Room {
             snapshot.updatedAt = Date.now();
             snapshotToSchema(snapshot, this.state);
             this.sendSessionInfo(client, reconnectToken);
-            this.scheduleBotTurn();
+            this.scheduleTurnAutomation();
             return;
         }
         if (reconnectToken && snapshot.status !== "lobby") {
@@ -127,13 +136,14 @@ export class MenschRoom extends Room {
             const active = getActivePlayer(snapshot);
             if (active?.id === client.sessionId && snapshot.status === "playing") {
                 snapshot = advanceToNextPlayer(snapshot);
+                this.startTurnWindow(snapshot);
                 const nextPlayer = getActivePlayer(snapshot);
                 snapshot.lastEvent = `${player.name} ist disconnected. ${nextPlayer?.name || "Niemand"} ist dran.`;
             }
         }
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
-        this.scheduleBotTurn();
+        this.scheduleTurnAutomation();
     }
     handleReady(client, ready) {
         const snapshot = schemaToSnapshot(this.state);
@@ -229,6 +239,7 @@ export class MenschRoom extends Room {
             this.sendError(client, "Du bist gerade nicht am Zug.");
             return;
         }
+        this.cancelAutoPlayFor(client.sessionId);
         this.rollForActivePlayer();
     }
     handleMove(client, pieceId) {
@@ -238,6 +249,7 @@ export class MenschRoom extends Room {
             this.sendError(client, "Du bist gerade nicht am Zug.");
             return;
         }
+        this.cancelAutoPlayFor(client.sessionId);
         this.moveActivePiece(pieceId);
     }
     handleChat(client, rawText) {
@@ -259,16 +271,49 @@ export class MenschRoom extends Room {
             this.sendError(client, "Du wurdest wegen Chat-Spam aus dem Raum entfernt.");
             this.removePlayerForModeration(snapshot, player, `${player.name} wurde wegen Chat-Spam entfernt.`);
             snapshotToSchema(snapshot, this.state);
+            this.scheduleTurnAutomation();
             return;
         }
         snapshot.chat.push({
             id: createId("chat"),
             playerName: player.name,
             color: player.color,
-            text: snapshot.settings.chatFilterEnabled ? filterChatText(text) : text,
+            text: this.filterChatForRoom(text, snapshot),
             createdAt: Date.now(),
         });
         trimChat(snapshot);
+        snapshot.updatedAt = Date.now();
+        snapshotToSchema(snapshot, this.state);
+    }
+    handleChatReport(client, message) {
+        const snapshot = schemaToSnapshot(this.state);
+        const reporter = snapshot.players.find((entry) => entry.id === client.sessionId);
+        if (!reporter) {
+            this.sendError(client, "Spieler nicht gefunden.");
+            return;
+        }
+        const messageId = String(message.messageId || "").trim().slice(0, 80);
+        const normalizedTerm = normalizeReportedFilterTerm(String(message.word || ""));
+        if (!messageId || !normalizedTerm) {
+            this.sendError(client, "Bitte ein Wort aus der Nachricht eintragen.");
+            return;
+        }
+        const targetMessage = snapshot.chat.find((entry) => entry.id === messageId && entry.color !== "system");
+        if (!targetMessage) {
+            this.sendError(client, "Diese Nachricht kann nicht gemeldet werden.");
+            return;
+        }
+        if (!isReportTermInText(targetMessage.text, normalizedTerm)) {
+            this.sendError(client, "Dieses Wort wurde in der Nachricht nicht gefunden.");
+            return;
+        }
+        const wasKnown = this.reportedFilterTerms.has(normalizedTerm);
+        this.reportedFilterTerms.add(normalizedTerm);
+        this.applyActiveChatFilter(snapshot);
+        snapshot.lastEvent = wasKnown
+            ? "Der gemeldete Begriff war bereits im Chat-Filter."
+            : "Ein gemeldeter Begriff wurde zur Filterliste hinzugefuegt.";
+        addSystemMessage(snapshot, snapshot.lastEvent);
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
     }
@@ -280,6 +325,8 @@ export class MenschRoom extends Room {
             return;
         }
         const rematch = resetForRematch(snapshot);
+        this.clearTurnWindow(rematch);
+        this.applyActiveChatFilter(rematch);
         addSystemMessage(rematch, `${player.name} hat eine Revanche gestartet.`);
         snapshotToSchema(rematch, this.state);
     }
@@ -320,9 +367,10 @@ export class MenschRoom extends Room {
         snapshot.winnerColor = "";
         snapshot.lastEvent = `${getActivePlayer(snapshot)?.name || "Ein Spieler"} beginnt.`;
         addSystemMessage(snapshot, "Das Spiel startet.");
+        this.startTurnWindow(snapshot);
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
-        this.scheduleBotTurn();
+        this.scheduleTurnAutomation();
     }
     rollForActivePlayer() {
         let snapshot = schemaToSnapshot(this.state);
@@ -357,9 +405,10 @@ export class MenschRoom extends Room {
         else {
             snapshot.lastEvent = `${activePlayer.name} würfelt ${dice}.`;
         }
+        this.keepOrStartTurnWindow(snapshot, activePlayer.id);
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
-        this.scheduleBotTurn();
+        this.scheduleTurnAutomation();
     }
     moveActivePiece(pieceId) {
         const before = schemaToSnapshot(this.state);
@@ -377,6 +426,7 @@ export class MenschRoom extends Room {
         if (snapshot.status === "finished") {
             snapshot.lastEvent = `${activePlayer.name} zieht${captureText} und gewinnt.`;
             addSystemMessage(snapshot, snapshot.lastEvent);
+            this.clearTurnWindow(snapshot);
             snapshotToSchema(snapshot, this.state);
             return;
         }
@@ -392,31 +442,112 @@ export class MenschRoom extends Room {
             snapshot = advanceToNextPlayer(snapshot);
             snapshot.lastEvent = `${event} ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
         }
+        this.keepOrStartTurnWindow(snapshot, activePlayer.id);
         snapshot.updatedAt = Date.now();
         snapshotToSchema(snapshot, this.state);
-        this.scheduleBotTurn();
+        this.scheduleTurnAutomation();
     }
-    scheduleBotTurn() {
+    scheduleTurnAutomation() {
+        this.clearAutomationTimeout();
         const snapshot = schemaToSnapshot(this.state);
         const activePlayer = getActivePlayer(snapshot);
-        if (snapshot.status !== "playing" || !activePlayer?.isBot) {
+        if (snapshot.status !== "playing" || !activePlayer) {
+            this.autoPlayPlayerId = "";
             return;
         }
-        this.clock.setTimeout(() => {
-            const current = schemaToSnapshot(this.state);
-            const bot = getActivePlayer(current);
-            if (current.status !== "playing" || !bot?.isBot) {
-                return;
-            }
-            if (!current.diceRolled) {
-                this.rollForActivePlayer();
-                return;
-            }
-            const move = chooseBotMove(current);
-            if (move) {
-                this.moveActivePiece(move.pieceId);
-            }
-        }, 700);
+        if (this.autoPlayPlayerId && this.autoPlayPlayerId !== activePlayer.id) {
+            this.autoPlayPlayerId = "";
+        }
+        if (activePlayer.isBot || this.autoPlayPlayerId === activePlayer.id) {
+            const delay = activePlayer.isBot ? BOT_STEP_DELAY_MS : HUMAN_AUTO_STEP_DELAY_MS;
+            this.automationTimeout = this.clock.setTimeout(() => {
+                this.playAutomatedStep(activePlayer.id, activePlayer.isBot ? "bot" : "timeout");
+            }, delay);
+            return;
+        }
+        const delay = Math.max(0, (snapshot.turnDeadlineAt || Date.now()) - Date.now());
+        this.automationTimeout = this.clock.setTimeout(() => {
+            this.startHumanAutoPlay(activePlayer.id);
+        }, delay);
+    }
+    startHumanAutoPlay(playerId) {
+        const snapshot = schemaToSnapshot(this.state);
+        const activePlayer = getActivePlayer(snapshot);
+        if (snapshot.status !== "playing" ||
+            !activePlayer ||
+            activePlayer.id !== playerId ||
+            activePlayer.isBot ||
+            Date.now() < snapshot.turnDeadlineAt) {
+            this.scheduleTurnAutomation();
+            return;
+        }
+        this.autoPlayPlayerId = playerId;
+        addSystemMessage(snapshot, `${activePlayer.name} ist nicht rechtzeitig dran. Der Computer spielt diesen Zug.`);
+        snapshot.lastEvent = `${activePlayer.name} ist nicht rechtzeitig dran. Der Computer übernimmt kurz.`;
+        snapshot.updatedAt = Date.now();
+        snapshotToSchema(snapshot, this.state);
+        this.scheduleTurnAutomation();
+    }
+    playAutomatedStep(playerId, reason) {
+        const snapshot = schemaToSnapshot(this.state);
+        const activePlayer = getActivePlayer(snapshot);
+        if (snapshot.status !== "playing" || !activePlayer || activePlayer.id !== playerId) {
+            this.scheduleTurnAutomation();
+            return;
+        }
+        if (reason === "timeout" && this.autoPlayPlayerId !== playerId) {
+            this.scheduleTurnAutomation();
+            return;
+        }
+        if (!snapshot.diceRolled) {
+            this.rollForActivePlayer();
+            return;
+        }
+        const move = chooseBotMove(snapshot);
+        if (move) {
+            this.moveActivePiece(move.pieceId);
+            return;
+        }
+        this.scheduleTurnAutomation();
+    }
+    startTurnWindow(snapshot) {
+        if (snapshot.status !== "playing") {
+            this.clearTurnWindow(snapshot);
+            return;
+        }
+        const activePlayer = getActivePlayer(snapshot);
+        if (!activePlayer) {
+            this.clearTurnWindow(snapshot);
+            return;
+        }
+        const now = Date.now();
+        snapshot.turnStartedAt = now;
+        snapshot.turnDeadlineAt = now + TURN_TIME_LIMIT_MS;
+    }
+    keepOrStartTurnWindow(snapshot, previousPlayerId) {
+        const activePlayer = getActivePlayer(snapshot);
+        const samePlayerStillActive = Boolean(activePlayer &&
+            activePlayer.id === previousPlayerId &&
+            snapshot.turnStartedAt &&
+            snapshot.turnDeadlineAt);
+        if (!samePlayerStillActive) {
+            this.startTurnWindow(snapshot);
+        }
+    }
+    clearTurnWindow(snapshot) {
+        snapshot.turnStartedAt = 0;
+        snapshot.turnDeadlineAt = 0;
+        this.autoPlayPlayerId = "";
+        this.clearAutomationTimeout();
+    }
+    clearAutomationTimeout() {
+        this.automationTimeout?.clear();
+        this.automationTimeout = null;
+    }
+    cancelAutoPlayFor(playerId) {
+        if (this.autoPlayPlayerId === playerId) {
+            this.autoPlayPlayerId = "";
+        }
     }
     addBotsToSnapshot(snapshot, amount) {
         let added = 0;
@@ -469,6 +600,26 @@ export class MenschRoom extends Room {
         addSystemMessage(snapshot, `${player.name} ist wieder beigetreten.`);
         return true;
     }
+    filterChatForRoom(text, snapshot) {
+        if (!snapshot.settings.chatFilterEnabled) {
+            return text;
+        }
+        return filterChatText(text, { extraPhrases: [...this.reportedFilterTerms] });
+    }
+    applyActiveChatFilter(snapshot) {
+        if (!snapshot.settings.chatFilterEnabled) {
+            return;
+        }
+        snapshot.chat = snapshot.chat.map((message) => {
+            if (message.color === "system") {
+                return message;
+            }
+            return {
+                ...message,
+                text: this.filterChatForRoom(message.text, snapshot),
+            };
+        });
+    }
     sendSessionInfo(client, reconnectToken) {
         this.clock.setTimeout(() => {
             client.send("sessionInfo", {
@@ -511,6 +662,7 @@ export class MenschRoom extends Room {
                 snapshot.currentPlayerIndex = currentIndex < 0 ? snapshot.currentPlayerIndex : currentIndex;
                 const nextSnapshot = advanceToNextPlayer(snapshot);
                 Object.assign(snapshot, nextSnapshot);
+                this.startTurnWindow(snapshot);
             }
             snapshot.updatedAt = Date.now();
         }
@@ -620,7 +772,7 @@ function createId(prefix) {
     return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 function rollDiceValue() {
-    return Math.floor(Math.random() * 6) + 1;
+    return randomInt(1, 7);
 }
 function isPlayerColor(value) {
     return PLAYER_COLORS.includes(value);

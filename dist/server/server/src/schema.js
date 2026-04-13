@@ -132,6 +132,8 @@ export class MenschState extends Schema {
         this.legalMoves = new ArraySchema();
         this.winnerColor = "";
         this.lastEvent = "";
+        this.turnStartedAt = 0;
+        this.turnDeadlineAt = 0;
         this.settings = new SettingsModel();
         this.chat = new ArraySchema();
         this.updatedAt = 0;
@@ -170,6 +172,12 @@ __decorate([
 __decorate([
     type("string")
 ], MenschState.prototype, "lastEvent", void 0);
+__decorate([
+    type("number")
+], MenschState.prototype, "turnStartedAt", void 0);
+__decorate([
+    type("number")
+], MenschState.prototype, "turnDeadlineAt", void 0);
 __decorate([
     type(SettingsModel)
 ], MenschState.prototype, "settings", void 0);
@@ -210,6 +218,8 @@ export function schemaToSnapshot(state) {
         })),
         winnerColor: state.winnerColor,
         lastEvent: state.lastEvent,
+        turnStartedAt: state.turnStartedAt,
+        turnDeadlineAt: state.turnDeadlineAt,
         settings: {
             strikeRequired: state.settings.strikeRequired,
             chatFilterEnabled: state.settings.chatFilterEnabled,
@@ -234,6 +244,8 @@ export function snapshotToSchema(snapshot, state) {
     state.rollAttempts = snapshot.rollAttempts;
     state.winnerColor = snapshot.winnerColor;
     state.lastEvent = snapshot.lastEvent;
+    state.turnStartedAt = snapshot.turnStartedAt;
+    state.turnDeadlineAt = snapshot.turnDeadlineAt;
     state.settings.strikeRequired = snapshot.settings.strikeRequired;
     state.settings.chatFilterEnabled = snapshot.settings.chatFilterEnabled;
     state.updatedAt = snapshot.updatedAt;

@@ -1,4 +1,4 @@
-// Neue Chatfilter-Regeln hier ergaenzen.
+// Neue Chatfilter-Regeln hier ergänzen.
 // Nutze bewusst Regex, damit auch getrennte Schreibweisen wie "f u c k" erkannt werden.
 export const CHAT_FILTER_RULES = [
     { label: "arsch", pattern: /a[\W_]*r[\W_]*s[\W_]*c[\W_]*h(?:[\W_]*l[\W_]*o[\W_]*c[\W_]*h)?/giu },
@@ -39,6 +39,227 @@ export const CHAT_FILTER_RULES = [
     { label: "verpiss dich", pattern: /v[\W_]*e[\W_]*r[\W_]*p[\W_]*[i1!|][\W_]*s[\W_]*s[\W_]*d[\W_]*[i1!|][\W_]*c[\W_]*h/giu },
     { label: "leck mich", pattern: /l[\W_]*e[\W_]*c[\W_]*k[\W_]*m[\W_]*[i1!|][\W_]*c[\W_]*h/giu },
 ];
-export function filterChatText(value) {
-    return CHAT_FILTER_RULES.reduce((text, rule) => text.replace(rule.pattern, "***"), value);
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F]/gu;
+const FILTER_CHAR_MAP = {
+    "0": "o",
+    "1": "i",
+    "!": "i",
+    "|": "i",
+    "3": "e",
+    "4": "a",
+    "@": "a",
+    "5": "s",
+    "$": "s",
+    "7": "t",
+    "8": "b",
+    "9": "g",
+    "\u0430": "a",
+    "\u0251": "a",
+    "\u0391": "a",
+    "\u0412": "b",
+    "\u042c": "b",
+    "\u0441": "c",
+    "\u03f2": "c",
+    "\u0435": "e",
+    "\u0395": "e",
+    "\u0456": "i",
+    "\u0406": "i",
+    "\u04cf": "i",
+    "\u043e": "o",
+    "\u039f": "o",
+    "\u0440": "p",
+    "\u03a1": "p",
+    "\u0455": "s",
+    "\u0405": "s",
+    "\u0442": "t",
+    "\u03a4": "t",
+    "\u03c5": "u",
+    "\u00b5": "u",
+    "\u0445": "x",
+    "\u03a7": "x",
+    "€": "e",
+    "ß": "ss",
+};
+const NORMALIZED_CHAT_BLOCKLIST = [
+    "arsch",
+    "arschloch",
+    "penis",
+    "bastard",
+    "depp",
+    "dummkopf",
+    "hurensohn",
+    "idiot",
+    "kacke",
+    "scheisse",
+    "scheiße",
+    "spast",
+    "ns",
+    "hs",
+    "nga",
+    "maher",
+    "fck",
+    "bimbo",
+    "nazi",
+    "nationalsozialsit",
+    "69",
+    "67",
+    "88",
+    "hh",
+    "bimbo",
+    "törke",
+    "ausländer",
+    "türke",
+    "kurde",
+    "hdf",
+    "stfu",
+    "dumm",
+    "KI",
+    "ChatGPT",
+    "AI",
+    "wichser",
+    "fuck",
+    "shit",
+    "neger",
+    "opfer",
+    "loser",
+    "penner",
+    "mongo",
+    "missgeburt",
+    "fotze",
+    "schlampe",
+    "nutte",
+    "hure",
+    "fresse",
+    "kanake",
+    "bitch",
+    "cunt",
+    "motherfucker",
+    "pussy",
+    "retard",
+    "verpissdich",
+    "leckmich",
+].map(normalizePhraseForFilter);
+const NORMALIZED_CHAT_PATTERNS = buildRepeatedLetterPatterns(NORMALIZED_CHAT_BLOCKLIST);
+export function filterChatText(value, options = {}) {
+    const withoutInvisibleChars = value.replace(INVISIBLE_CHARS, "");
+    const regexFiltered = CHAT_FILTER_RULES.reduce((text, rule) => text.replace(rule.pattern, "***"), withoutInvisibleChars);
+    return maskNormalizedMatches(regexFiltered, options.extraPhrases || []);
+}
+export function normalizeReportedFilterTerm(value) {
+    const cleaned = value
+        .replace(INVISIBLE_CHARS, "")
+        .trim()
+        .replace(/\s+/g, " ")
+        .slice(0, 40);
+    const normalized = normalizePhraseForFilter(cleaned);
+    return normalized.length >= 2 && normalized.length <= 32 ? normalized : "";
+}
+export function isReportTermInText(text, normalizedTerm) {
+    if (!isUsableFilterTerm(normalizedTerm)) {
+        return false;
+    }
+    const folded = foldTextForFilter(text);
+    if (!folded.text) {
+        return false;
+    }
+    const pattern = buildRepeatedLetterPattern(normalizedTerm);
+    pattern.lastIndex = 0;
+    return pattern.test(folded.text);
+}
+function maskNormalizedMatches(value, extraPhrases) {
+    const folded = foldTextForFilter(value);
+    if (!folded.text) {
+        return value;
+    }
+    const ranges = [];
+    const dynamicPatterns = buildRepeatedLetterPatterns(extraPhrases);
+    for (const pattern of [...NORMALIZED_CHAT_PATTERNS, ...dynamicPatterns]) {
+        pattern.lastIndex = 0;
+        let match = pattern.exec(folded.text);
+        while (match) {
+            const first = folded.spans[match.index];
+            const last = folded.spans[match.index + match[0].length - 1];
+            if (first && last) {
+                ranges.push({ start: first.start, end: last.end });
+            }
+            match = pattern.exec(folded.text);
+        }
+    }
+    return replaceRanges(value, mergeRanges(ranges));
+}
+function foldTextForFilter(value) {
+    let text = "";
+    const spans = [];
+    for (let index = 0; index < value.length;) {
+        const start = index;
+        const codePoint = value.codePointAt(index);
+        if (!codePoint) {
+            index += 1;
+            continue;
+        }
+        const char = String.fromCodePoint(codePoint);
+        index += char.length;
+        const folded = foldChar(char);
+        for (const foldedChar of folded) {
+            text += foldedChar;
+            spans.push({ start, end: index });
+        }
+    }
+    return { text, spans };
+}
+function foldChar(char) {
+    const normalized = char
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/gu, "")
+        .toLowerCase();
+    const mapped = Array.from(normalized, (entry) => FILTER_CHAR_MAP[entry] || entry).join("");
+    return mapped.replace(/[^a-z]/gu, "");
+}
+function normalizePhraseForFilter(phrase) {
+    return Array.from(phrase, (char) => foldChar(char)).join("");
+}
+function buildRepeatedLetterPatterns(phrases) {
+    const seen = new Set();
+    const patterns = [];
+    for (const phrase of phrases) {
+        const normalized = normalizePhraseForFilter(phrase);
+        if (!isUsableFilterTerm(normalized) || seen.has(normalized)) {
+            continue;
+        }
+        seen.add(normalized);
+        patterns.push(buildRepeatedLetterPattern(normalized));
+    }
+    return patterns;
+}
+function buildRepeatedLetterPattern(phrase) {
+    const source = Array.from(phrase, (char) => `${escapeRegExp(char)}+`).join("");
+    return new RegExp(source, "gu");
+}
+function isUsableFilterTerm(value) {
+    return value.length >= 2 && value.length <= 32;
+}
+function mergeRanges(ranges) {
+    if (ranges.length === 0) {
+        return [];
+    }
+    const sorted = [...ranges].sort((a, b) => a.start - b.start || b.end - a.end);
+    const merged = [];
+    for (const range of sorted) {
+        const previous = merged[merged.length - 1];
+        if (previous && range.start <= previous.end) {
+            previous.end = Math.max(previous.end, range.end);
+        }
+        else {
+            merged.push({ ...range });
+        }
+    }
+    return merged;
+}
+function replaceRanges(value, ranges) {
+    return [...ranges]
+        .sort((a, b) => b.start - a.start)
+        .reduce((text, range) => `${text.slice(0, range.start)}***${text.slice(range.end)}`, value);
+}
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

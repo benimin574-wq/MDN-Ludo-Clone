@@ -2,6 +2,7 @@ export const PIECES_PER_PLAYER = 4;
 export const TRACK_LENGTH = 40;
 export const HOME_LENGTH = 4;
 export const FINAL_POSITION = TRACK_LENGTH + HOME_LENGTH - 1;
+export const TURN_TIME_LIMIT_MS = 20_000;
 export const PLAYER_COLORS = ["blue", "yellow", "green", "red"];
 export const CLOCKWISE_COLORS = ["red", "blue", "green", "yellow"];
 export const COLOR_META = {
