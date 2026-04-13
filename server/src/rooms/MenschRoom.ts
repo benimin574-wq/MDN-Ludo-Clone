@@ -2,7 +2,13 @@ import { randomInt } from "node:crypto";
 import type { Client } from "@colyseus/core";
 import { Room } from "@colyseus/core";
 import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../../shared/src/chatFilter";
-import { COLOR_META, PLAYER_COLORS, TURN_TIME_LIMIT_MS } from "../../../shared/src/constants";
+import {
+  COLOR_META,
+  DEFAULT_TURN_TIME_LIMIT_MS,
+  MAX_TURN_TIME_LIMIT_MS,
+  MIN_TURN_TIME_LIMIT_MS,
+  PLAYER_COLORS,
+} from "../../../shared/src/constants";
 import {
   advanceToNextPlayer,
   applyMove,
@@ -21,8 +27,10 @@ import { MenschState, schemaToSnapshot, snapshotToSchema } from "../schema";
 interface JoinOptions {
   name?: string;
   color?: PlayerColor;
+  customColor?: string;
   botCount?: number;
   strikeRequired?: boolean;
+  turnTimeLimitMs?: number;
   reconnectToken?: string;
 }
 
@@ -41,6 +49,7 @@ const CHAT_WINDOW_MS = 8000;
 const CHAT_MESSAGE_LIMIT = 5;
 const BOT_STEP_DELAY_MS = 700;
 const HUMAN_AUTO_STEP_DELAY_MS = 520;
+const GLOBAL_REPORTED_FILTER_TERMS = new Set<string>();
 
 export class MenschRoom extends Room<{ state: MenschState }> {
   private hostId = "";
@@ -48,15 +57,17 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private readonly tokenByPlayerId = new Map<string, string>();
   private readonly kickedPlayerIds = new Set<string>();
   private readonly chatStats = new Map<string, ChatStats>();
-  private readonly reportedFilterTerms = new Set<string>();
+  private readonly reportedFilterTerms = GLOBAL_REPORTED_FILTER_TERMS;
   private automationTimeout: { clear: () => void } | null = null;
   private autoPlayPlayerId = "";
 
   onCreate(options: JoinOptions): void {
     this.maxClients = 4;
-    this.autoDispose = false;
+    this.autoDispose = true;
     this.setState(new MenschState());
-    snapshotToSchema(createInitialSnapshot(this.roomId, Boolean(options.strikeRequired)), this.state);
+    const initialSnapshot = createInitialSnapshot(this.roomId, Boolean(options.strikeRequired));
+    initialSnapshot.settings.turnTimeLimitMs = clampTurnTimeLimit(options.turnTimeLimitMs);
+    snapshotToSchema(initialSnapshot, this.state);
 
     this.onMessage("toggleReady", (client, message: { ready?: boolean }) => {
       this.handleReady(client, Boolean(message.ready));
@@ -66,6 +77,12 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     });
     this.onMessage("setChatFilter", (client, message: { enabled?: boolean }) => {
       this.handleChatFilter(client, Boolean(message.enabled));
+    });
+    this.onMessage("setTurnTimeLimit", (client, message: { turnTimeLimitMs?: number }) => {
+      this.handleTurnTimeLimit(client, message.turnTimeLimitMs);
+    });
+    this.onMessage("setCustomColor", (client, message: { customColor?: string }) => {
+      this.handleCustomColor(client, String(message.customColor || ""));
     });
     this.onMessage("startGame", (client) => {
       this.handleStartGame(client);
@@ -130,6 +147,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       id: client.sessionId,
       name: playerName,
       color,
+      customColor: cleanCustomColor(options.customColor, COLOR_META[color].hex),
       ready: false,
       connected: true,
       isBot: false,
@@ -194,6 +212,10 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     this.scheduleTurnAutomation();
   }
 
+  onDispose(): void {
+    this.clearAutomationTimeout();
+  }
+
   private handleReady(client: Client, ready: boolean): void {
     const snapshot = schemaToSnapshot(this.state);
     if (snapshot.status !== "lobby") {
@@ -248,6 +270,46 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     snapshot.settings.chatFilterEnabled = enabled;
     snapshot.lastEvent = `Chat-Filter ist ${enabled ? "aktiv" : "inaktiv"}.`;
     addSystemMessage(snapshot, snapshot.lastEvent);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+  }
+
+  private handleTurnTimeLimit(client: Client, rawTurnTimeLimitMs: unknown): void {
+    const snapshot = schemaToSnapshot(this.state);
+    if (snapshot.status !== "lobby") {
+      this.sendError(client, "Die Zugzeit kann nur in der Lobby geändert werden.");
+      return;
+    }
+
+    if (!this.isHost(client, snapshot)) {
+      this.sendError(client, "Nur der Host kann die Zugzeit ändern.");
+      return;
+    }
+
+    const turnTimeLimitMs = clampTurnTimeLimit(rawTurnTimeLimitMs);
+    snapshot.settings.turnTimeLimitMs = turnTimeLimitMs;
+    snapshot.lastEvent = `Zugzeit auf ${Math.round(turnTimeLimitMs / 1000)} Sekunden gesetzt.`;
+    addSystemMessage(snapshot, snapshot.lastEvent);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+  }
+
+  private handleCustomColor(client: Client, rawCustomColor: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    if (snapshot.status !== "lobby") {
+      this.sendError(client, "Die Spielerfarbe kann nur in der Lobby geändert werden.");
+      return;
+    }
+
+    const player = snapshot.players.find((entry) => entry.id === client.sessionId);
+    if (!player || player.isBot) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return;
+    }
+
+    player.customColor = cleanCustomColor(rawCustomColor, COLOR_META[player.color].hex);
+    player.ready = false;
+    snapshot.lastEvent = `${player.name} hat die Spielerfarbe angepasst.`;
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
   }
@@ -372,6 +434,11 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
+    if (!snapshot.settings.chatFilterEnabled) {
+      this.sendError(client, "Der Chat-Filter ist deaktiviert.");
+      return;
+    }
+
     const messageId = String(message.messageId || "").trim().slice(0, 80);
     const normalizedTerm = normalizeReportedFilterTerm(String(message.word || ""));
     if (!messageId || !normalizedTerm) {
@@ -399,6 +466,9 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     addSystemMessage(snapshot, snapshot.lastEvent);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
+    client.send("reportAccepted", {
+      message: wasKnown ? "Report geprüft. Der Begriff war schon im Filter." : "Report angenommen. Der Begriff wird jetzt gefiltert.",
+    });
   }
 
   private handleRematch(client: Client): void {
@@ -444,6 +514,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private startGame(snapshot: GameStateSnapshot): void {
     snapshot.players = sortPlayersClockwise(snapshot.players).map((player) => ({
       ...player,
+      customColor: cleanCustomColor(player.customColor, COLOR_META[player.color].hex),
       pieces: createPieces(player.color),
     }));
     snapshot.status = "playing";
@@ -493,6 +564,10 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       } else {
         const event = `${activePlayer.name} würfelt ${dice}; kein Zug möglich.`;
         snapshot = advanceToNextPlayer(snapshot);
+        snapshot.diceValue = dice;
+        snapshot.diceRolled = false;
+        snapshot.rollAttempts = 0;
+        snapshot.legalMoves = [];
         snapshot.lastEvent = `${event} ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
       }
     } else {
@@ -640,8 +715,10 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     }
 
     const now = Date.now();
+    const turnTimeLimitMs = clampTurnTimeLimit(snapshot.settings.turnTimeLimitMs);
+    snapshot.settings.turnTimeLimitMs = turnTimeLimitMs;
     snapshot.turnStartedAt = now;
-    snapshot.turnDeadlineAt = now + TURN_TIME_LIMIT_MS;
+    snapshot.turnDeadlineAt = now + turnTimeLimitMs;
   }
 
   private keepOrStartTurnWindow(snapshot: GameStateSnapshot, previousPlayerId: string): void {
@@ -689,6 +766,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
         id: `bot-${color}`,
         name: playerName,
         color,
+        customColor: COLOR_META[color].hex,
         ready: true,
         connected: true,
         isBot: true,
@@ -930,6 +1008,29 @@ function cleanPlayerName(value?: string): string {
 
 function cleanChatText(value: string): string {
   return value.trim().replace(/\s+/g, " ").slice(0, 240);
+}
+
+function cleanCustomColor(value: unknown, fallback: string): string {
+  const color = String(value || "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(color)) {
+    return color.toLowerCase();
+  }
+
+  if (/^#[0-9a-f]{3}$/i.test(color)) {
+    const [, r, g, b] = color.toLowerCase();
+    return `#${r}${r}${g}${g}${b}${b}`;
+  }
+
+  return fallback;
+}
+
+function clampTurnTimeLimit(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TURN_TIME_LIMIT_MS;
+  }
+
+  return Math.min(MAX_TURN_TIME_LIMIT_MS, Math.max(MIN_TURN_TIME_LIMIT_MS, Math.round(parsed)));
 }
 
 function cleanToken(value?: string): string {

@@ -12,6 +12,7 @@ export class PlayerModel extends Schema {
   @type("string") id = "";
   @type("string") name = "";
   @type("string") color = "";
+  @type("string") customColor = "";
   @type("boolean") ready = false;
   @type("boolean") connected = true;
   @type("boolean") isBot = false;
@@ -29,6 +30,7 @@ export class ChatMessageModel extends Schema {
 export class SettingsModel extends Schema {
   @type("boolean") strikeRequired = false;
   @type("boolean") chatFilterEnabled = true;
+  @type("number") turnTimeLimitMs = 20_000;
 }
 
 export class MoveOptionModel extends Schema {
@@ -66,6 +68,7 @@ export function schemaToSnapshot(state: MenschState): GameStateSnapshot {
       id: player.id,
       name: player.name,
       color: player.color as PlayerState["color"],
+      customColor: player.customColor,
       ready: player.ready,
       connected: player.connected,
       isBot: player.isBot,
@@ -93,6 +96,7 @@ export function schemaToSnapshot(state: MenschState): GameStateSnapshot {
     settings: {
       strikeRequired: state.settings.strikeRequired,
       chatFilterEnabled: state.settings.chatFilterEnabled,
+      turnTimeLimitMs: state.settings.turnTimeLimitMs,
     },
     chat: state.chat.map((message) => ({
       id: message.id,
@@ -119,6 +123,7 @@ export function snapshotToSchema(snapshot: GameStateSnapshot, state: MenschState
   state.turnDeadlineAt = snapshot.turnDeadlineAt;
   state.settings.strikeRequired = snapshot.settings.strikeRequired;
   state.settings.chatFilterEnabled = snapshot.settings.chatFilterEnabled;
+  state.settings.turnTimeLimitMs = snapshot.settings.turnTimeLimitMs;
   state.updatedAt = snapshot.updatedAt;
 
   replaceArray(
@@ -128,6 +133,7 @@ export function snapshotToSchema(snapshot: GameStateSnapshot, state: MenschState
       model.id = player.id;
       model.name = player.name;
       model.color = player.color;
+      model.customColor = player.customColor;
       model.ready = player.ready;
       model.connected = player.connected;
       model.isBot = player.isBot;

@@ -15,6 +15,7 @@ export interface PlayerState {
   id: string;
   name: string;
   color: PlayerColor;
+  customColor: string;
   ready: boolean;
   connected: boolean;
   isBot: boolean;
@@ -32,6 +33,7 @@ export interface ChatMessage {
 export interface GameSettings {
   strikeRequired: boolean;
   chatFilterEnabled: boolean;
+  turnTimeLimitMs: number;
 }
 
 export interface MoveOption {

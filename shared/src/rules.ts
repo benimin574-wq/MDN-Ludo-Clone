@@ -1,5 +1,6 @@
 import {
   CLOCKWISE_COLORS,
+  DEFAULT_TURN_TIME_LIMIT_MS,
   FINAL_POSITION,
   HOME_LENGTH,
   PIECES_PER_PLAYER,
@@ -33,7 +34,7 @@ export function createInitialSnapshot(roomId: string, strikeRequired = false): G
     lastEvent: "Lobby erstellt.",
     turnStartedAt: 0,
     turnDeadlineAt: 0,
-    settings: { strikeRequired, chatFilterEnabled: true },
+    settings: { strikeRequired, chatFilterEnabled: true, turnTimeLimitMs: DEFAULT_TURN_TIME_LIMIT_MS },
     chat: [],
     updatedAt: Date.now(),
   };
@@ -246,6 +247,7 @@ export function resetForRematch(state: GameStateSnapshot): GameStateSnapshot {
   nextState.players = sortPlayersClockwise(nextState.players).map((player) => ({
     ...player,
     ready: player.isBot,
+    customColor: player.customColor,
     pieces: createPieces(player.color),
   }));
   nextState.currentPlayerIndex = 0;
