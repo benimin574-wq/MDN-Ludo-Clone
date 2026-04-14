@@ -3,6 +3,11 @@
 Browser-Spiel nach dem Prinzip von "Mensch aergere dich nicht" mit React-Client,
 Colyseus-Server und gemeinsamer TypeScript-Regellogik.
 
+## Rechtlicher Hinweis
+
+Dieses Projekt ist ein unabhaengiges, inoffizielles Spielprojekt. Details stehen
+in `Notice.md`; der Code steht unter der im Repository enthaltenen MIT-Lizenz.
+
 ## Schnellstart
 
 Auf diesem Rechner kann PowerShell `npm.ps1` blockieren. Nutze deshalb `npm.cmd`:
