@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Runtime logs
+*.log
+*.err
+
+# Local environment and secrets
+.env
+.env.*
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Audio assets stay local and must not be committed.
+assets/music/
+assets/sounds/
+public/audio/
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.m4a
+*.aac
+*.opus
+*.mid
+*.midi
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
