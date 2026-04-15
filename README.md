@@ -70,7 +70,7 @@ Der Server ist die Quelle der Wahrheit. Der Client rendert den synchronisierten 
 - `server/src/schema.ts` - synchronisiertes Colyseus-State-Schema.
 - `client/src/App.tsx` - App-Fluss, Lobby, Spielsteuerung, Chat, Timer und UI-Zustand.
 - `client/src/Board.tsx` - Brett und Figuren-Rendering.
-- `client/src/assets.ts` - versionierte Bildassets; Audio bleibt leer, solange keine erlaubten lokalen Assets eingebunden werden.
+- `client/src/assets.ts` - Bildassets und lokal eingebundene Audioassets; Audio-Dateien bleiben ausserhalb von Git.
 - `client/src/styles.css` - Layout, Brett, Lobby, Chat, Modals und responsive Darstellung.
 
 ## Weiterentwicklung

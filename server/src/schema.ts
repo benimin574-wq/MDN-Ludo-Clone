@@ -43,6 +43,7 @@ export class MoveOptionModel extends Schema {
 export class MenschState extends Schema {
   @type("string") roomId = "";
   @type("string") hostId = "";
+  @type("string") gameMode = "multiplayer";
   @type("string") status = "lobby";
   @type([PlayerModel]) players = new ArraySchema<PlayerModel>();
   @type("number") currentPlayerIndex = 0;
@@ -63,6 +64,7 @@ export function schemaToSnapshot(state: MenschState): GameStateSnapshot {
   return {
     roomId: state.roomId,
     hostId: state.hostId,
+    gameMode: state.gameMode as GameStateSnapshot["gameMode"],
     status: state.status as GameStateSnapshot["status"],
     players: state.players.map((player) => ({
       id: player.id,
@@ -112,6 +114,7 @@ export function schemaToSnapshot(state: MenschState): GameStateSnapshot {
 export function snapshotToSchema(snapshot: GameStateSnapshot, state: MenschState): void {
   state.roomId = snapshot.roomId;
   state.hostId = snapshot.hostId;
+  state.gameMode = snapshot.gameMode;
   state.status = snapshot.status;
   state.currentPlayerIndex = snapshot.currentPlayerIndex;
   state.diceValue = snapshot.diceValue;

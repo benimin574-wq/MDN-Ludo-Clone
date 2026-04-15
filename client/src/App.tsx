@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, FormEvent, MutableRefObject } from "react";
+import type { CSSProperties, Dispatch, FormEvent, MutableRefObject, SetStateAction } from "react";
 import { Client, type Room } from "@colyseus/sdk";
 import {
   COLOR_META,
   DEFAULT_TURN_TIME_LIMIT_MS,
   MAX_TURN_TIME_LIMIT_MS,
   MIN_TURN_TIME_LIMIT_MS,
+  PLAYER_COLORS,
+  getDefaultBotCountForMode,
+  getMaxPlayersForMode,
+  getPlayerColorsForMode,
 } from "../../shared/src/constants";
-import type { ChatMessage, GameStateSnapshot, PlayerColor, PlayerState } from "../../shared/src/types";
-import { boardAsset, musicAssets, pieceAssets, pieceSvgSources, soundAssets } from "./assets";
+import type { ChatMessage, GameMode, GameStateSnapshot, PlayerColor, PlayerState } from "../../shared/src/types";
+import { boardAsset, musicAssets, pieceAssets, soundAssets } from "./assets";
 import { Board, type CaptureMarker, type PieceMoveAnimation } from "./Board";
+import { getPieceAssetForColor, useTintedPieceAssets } from "./pieceTint";
 
 const DEFAULT_NAME = "Spieler";
 const LAST_ROOM_KEY = "mensch:last-room";
@@ -43,7 +48,7 @@ const DICE_PIPS: Record<number, number[]> = {
   5: [1, 3, 5, 7, 9],
   6: [1, 3, 4, 6, 7, 9],
 };
-const popupPieceAssetCache = new Map<string, string>();
+const EMPTY_PLAYERS: PlayerState[] = [];
 let sharedMusicAudio: HTMLAudioElement | null = null;
 
 interface SavedRoomSession {
@@ -55,6 +60,15 @@ type ThemeMode = "light" | "dark";
 type PortalGameId = "mensch";
 type ClickSoundPreset = "classic" | "soft" | "arcade" | "wood";
 type UiSoundName = "confirm" | "error" | "toggle" | "start" | "roll" | "move" | "capture" | "win" | "lose" | "turn" | "step";
+type AdminDiceBias = "normal" | "high" | "six";
+
+interface CreateModeOption {
+  id: GameMode;
+  title: string;
+  detail: string;
+  note: string;
+  locked?: boolean;
+}
 
 interface PortalGame {
   id: PortalGameId;
@@ -79,7 +93,7 @@ const PORTAL_GAMES: PortalGame[] = [
     eyebrow: "Classic Multiplayer",
     description: "Raum erstellen, Code teilen und mit Freunden oder Computern spielen.",
     status: "Jetzt spielbar",
-    players: "2-4 Spieler",
+    players: "2-8 Spieler",
     image: boardAsset,
   },
 ];
@@ -107,6 +121,28 @@ const PLACEHOLDER_GAMES: PlaceholderGame[] = [
   },
 ];
 
+const CREATE_MODE_OPTIONS: CreateModeOption[] = [
+  {
+    id: "singleplayer",
+    title: "Singleplayer",
+    detail: "Du gegen Computer.",
+    note: "Startet mit 3 Bots.",
+  },
+  {
+    id: "multiplayer",
+    title: "Multiplayer",
+    detail: "Classic-Runde.",
+    note: "Bis 4 Spieler.",
+  },
+  {
+    id: "party",
+    title: "Party-Modus",
+    detail: "Große Runde.",
+    note: "Bis 8 Spieler. Bald spielbar.",
+    locked: true,
+  },
+];
+
 interface PlayerPreferences {
   dragToMove: boolean;
   musicEnabled: boolean;
@@ -115,6 +151,8 @@ interface PlayerPreferences {
   clickSoundPreset: ClickSoundPreset;
   clickVolume: number;
 }
+
+type PlayerPreferencesSetter = Dispatch<SetStateAction<PlayerPreferences>>;
 
 interface DiceRollStats {
   counts: Record<number, number>;
@@ -141,9 +179,7 @@ export function App() {
   const [playerName, setPlayerName] = useState(() => getSavedPlayerNameCookie() || createRandomPlayerName());
   const [hasCustomPlayerName, setHasCustomPlayerName] = useState(() => Boolean(getSavedPlayerNameCookie()));
   const [selectedColor, setSelectedColor] = useState<PlayerColor>("blue");
-  const [selectedCustomColor, setSelectedCustomColor] = useState(COLOR_META.blue.hex);
   const [joinCode, setJoinCode] = useState("");
-  const [botCount] = useState(0);
   const [strikeRequired, setStrikeRequired] = useState(false);
   const [turnTimeSeconds, setTurnTimeSeconds] = useState(DEFAULT_TURN_TIME_LIMIT_MS / 1000);
   const [selectedPieceId, setSelectedPieceId] = useState("");
@@ -158,12 +194,15 @@ export function App() {
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getSavedThemeMode());
   const [playerPreferences, setPlayerPreferences] = useState<PlayerPreferences>(() => getSavedPlayerPreferences());
   const [selectedGameId, setSelectedGameId] = useState<PortalGameId | null>(null);
+  const [createModeOpen, setCreateModeOpen] = useState(false);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [cookieConsentAccepted, setCookieConsentAccepted] = useState(() => hasCookieConsent());
   const [now, setNow] = useState(() => Date.now());
   const [moveAnimation, setMoveAnimation] = useState<PieceMoveAnimation | null>(null);
   const [captureMarkers, setCaptureMarkers] = useState<CaptureMarker[]>([]);
   const [diceRollStats, setDiceRollStats] = useState<DiceRollStats>(() => createEmptyDiceRollStats());
   const previousStateRef = useRef<GameStateSnapshot | null>(null);
+  useTintedPieceAssets(state?.players ?? EMPTY_PLAYERS);
 
   const me = useMemo(
     () => state?.players.find((player) => player.id === room?.sessionId),
@@ -218,10 +257,6 @@ export function App() {
     document.documentElement.dataset.theme = themeMode;
     localStorage.setItem(THEME_STORAGE_KEY, themeMode);
   }, [themeMode]);
-
-  useEffect(() => {
-    setSelectedCustomColor(COLOR_META[selectedColor].hex);
-  }, [selectedColor]);
 
   useEffect(() => {
     if (!state) {
@@ -300,18 +335,21 @@ export function App() {
     }
   }, [state?.settings.chatFilterEnabled]);
 
-  async function createRoom() {
+  async function createRoom(gameMode: GameMode) {
     setBusy(true);
     setErrorMessage("");
     try {
+      const color = getDefaultColorForMode(gameMode);
       const joinedRoom = await getClient(clientRef).create("mensch", {
         name: playerName,
-        color: selectedColor,
-        customColor: selectedCustomColor,
-        botCount,
+        color,
+        customColor: COLOR_META[color].hex,
+        botCount: getDefaultBotCountForMode(gameMode),
+        gameMode,
         strikeRequired,
         turnTimeLimitMs: secondsToMs(turnTimeSeconds),
       });
+      setCreateModeOpen(false);
       attachRoom(joinedRoom);
       playSound("confirm");
     } catch (error) {
@@ -336,7 +374,7 @@ export function App() {
       const joinedRoom = await getClient(clientRef).joinById(code, {
         name: playerName,
         color: selectedColor,
-        customColor: selectedCustomColor,
+        customColor: COLOR_META[selectedColor].hex,
         reconnectToken: getReconnectToken(code),
       });
       attachRoom(joinedRoom);
@@ -362,6 +400,7 @@ export function App() {
     setChatReportTarget(null);
     setChatReportWord("");
     setDiceRollStats(createEmptyDiceRollStats());
+    setAdminUnlocked(false);
     setState(normalizeState(joinedRoom.state));
 
     joinedRoom.onStateChange((nextState) => {
@@ -383,6 +422,17 @@ export function App() {
       setErrorMessage(message.message || "Report wurde angenommen.");
       playSound("confirm");
     });
+    joinedRoom.onMessage("adminUnlocked", (message: { message?: string }) => {
+      setAdminUnlocked(true);
+      setToastTone("success");
+      setErrorMessage(message.message || "Admin-Menue freigeschaltet.");
+      playSound("confirm");
+    });
+    joinedRoom.onMessage("adminActionAccepted", (message: { message?: string }) => {
+      setToastTone("success");
+      setErrorMessage(message.message || "Admin-Aktion ausgefuehrt.");
+      playSound("confirm");
+    });
     joinedRoom.onMessage("kicked", (message: { message?: string }) => {
       clearRoomSession(joinedRoom.roomId);
       setSavedRoom(getSavedRoomSession());
@@ -402,6 +452,7 @@ export function App() {
       setChatReportTarget(null);
       setChatReportWord("");
       setDiceRollStats(createEmptyDiceRollStats());
+      setAdminUnlocked(false);
     });
   }
 
@@ -427,9 +478,8 @@ export function App() {
     room?.send("setTurnTimeLimit", { turnTimeLimitMs: secondsToMs(nextSeconds) });
   }
 
-  function sendCustomColor(customColor: string) {
-    setSelectedCustomColor(customColor);
-    room?.send("setCustomColor", { customColor });
+  function sendVisualColor(color: PlayerColor) {
+    room?.send("setCustomColor", { customColor: COLOR_META[color].hex });
   }
 
   function addBot() {
@@ -550,7 +600,6 @@ export function App() {
   function closeChatReport() {
     setChatReportTarget(null);
     setChatReportWord("");
-    setDiceRollStats(createEmptyDiceRollStats());
   }
 
   function submitChatReport(event: FormEvent<HTMLFormElement>) {
@@ -659,7 +708,7 @@ export function App() {
           </div>
 
           <div className="entry-actions">
-            <button className="entry-primary" disabled={busy} onClick={createRoom}>
+            <button className="entry-primary" disabled={busy} onClick={() => setCreateModeOpen(true)}>
               Spiel erstellen
             </button>
             <button className="button-secondary" onClick={() => setRulesOpen(true)}>
@@ -707,6 +756,13 @@ export function App() {
         {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
         {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
         {rulesOpen ? <RulesDialog onClose={() => setRulesOpen(false)} /> : null}
+        {createModeOpen ? (
+          <CreateModeDialog
+            busy={busy}
+            onCreate={createRoom}
+            onClose={() => setCreateModeOpen(false)}
+          />
+        ) : null}
       </main>
     );
   }
@@ -726,7 +782,7 @@ export function App() {
           onKickPlayer={kickPlayer}
           onChatFilter={sendChatFilter}
           onTurnTimeLimit={sendTurnTimeLimit}
-          onCustomColor={sendCustomColor}
+          onVisualColor={sendVisualColor}
           onChatText={setChatText}
           onSendChat={sendChat}
           onReportChatMessage={openChatReport}
@@ -739,6 +795,7 @@ export function App() {
           preferences={playerPreferences}
           onPreferencesChange={setPlayerPreferences}
         />
+        {adminUnlocked ? <AdminDock room={room} state={state} meId={room.sessionId} /> : null}
         {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
         {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
         {rulesOpen ? <RulesDialog onClose={() => setRulesOpen(false)} /> : null}
@@ -827,6 +884,7 @@ export function App() {
         onPreferencesChange={setPlayerPreferences}
         diceRollStats={diceRollStats}
       />
+      {adminUnlocked ? <AdminDock room={room} state={state} meId={room.sessionId} /> : null}
       <AudioPlayer
         preferences={playerPreferences}
         onPreferencesChange={setPlayerPreferences}
@@ -947,6 +1005,124 @@ function CookieNotice({ onAccept }: { onAccept: () => void }) {
   );
 }
 
+function ColorPalette({
+  value,
+  unavailableColors = [],
+  colors = PLAYER_COLORS,
+  onChange,
+}: {
+  value: PlayerColor;
+  unavailableColors?: PlayerColor[];
+  colors?: PlayerColor[];
+  onChange: (color: PlayerColor) => void;
+}) {
+  const unavailable = new Set(unavailableColors);
+
+  return (
+    <fieldset className="color-palette">
+      <legend>Eigene Farbe</legend>
+      <div className="color-palette__grid">
+        {colors.map((color) => {
+          const meta = COLOR_META[color];
+          const disabled = unavailable.has(color) && color !== value;
+          return (
+            <button
+              key={color}
+              type="button"
+              className={`color-palette__swatch ${value === color ? "color-palette__swatch--active" : ""}`}
+              style={{ "--swatch-color": meta.hex, "--swatch-soft": meta.soft } as CSSProperties}
+              onClick={() => onChange(color)}
+              disabled={disabled}
+              aria-pressed={value === color}
+              title={disabled ? `${meta.label} ist schon vergeben` : meta.label}
+            >
+              <span aria-hidden="true" />
+              <strong>{meta.label}</strong>
+            </button>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+function CreateModeDialog({
+  busy,
+  onCreate,
+  onClose,
+}: {
+  busy: boolean;
+  onCreate: (mode: GameMode) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Spielmodus auswählen">
+      <section className="rules-dialog create-mode-dialog">
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">Neue Runde</p>
+            <h2>Spielmodus auswählen</h2>
+          </div>
+          <button className="button-secondary" type="button" onClick={onClose}>
+            Schließen
+          </button>
+        </div>
+        <div className="create-mode-grid">
+          {CREATE_MODE_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className={`create-mode-card ${option.locked ? "create-mode-card--locked" : ""}`}
+              disabled={busy || option.locked}
+              onClick={() => onCreate(option.id)}
+            >
+              <strong>{option.title}</strong>
+              <span>{option.detail}</span>
+              <small>{option.note}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ColorPickerDialog({
+  value,
+  colors,
+  unavailableColors,
+  onChange,
+  onClose,
+}: {
+  value: PlayerColor;
+  colors: PlayerColor[];
+  unavailableColors: PlayerColor[];
+  onChange: (color: PlayerColor) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Farbe auswählen">
+      <section className="rules-dialog color-picker-dialog">
+        <div className="dialog-head">
+          <div>
+            <p className="eyebrow">Eigene Farbe</p>
+            <h2>Farbe auswählen</h2>
+          </div>
+          <button className="button-secondary" type="button" onClick={onClose}>
+            Schließen
+          </button>
+        </div>
+        <ColorPalette
+          value={value}
+          colors={colors}
+          unavailableColors={unavailableColors}
+          onChange={onChange}
+        />
+      </section>
+    </div>
+  );
+}
+
 interface LobbyStageProps {
   state: GameStateSnapshot;
   meId: string;
@@ -959,7 +1135,7 @@ interface LobbyStageProps {
   onKickPlayer: (playerId: string) => void;
   onChatFilter: (enabled: boolean) => void;
   onTurnTimeLimit: (seconds: number) => void;
-  onCustomColor: (customColor: string) => void;
+  onVisualColor: (color: PlayerColor) => void;
   onChatText: (value: string) => void;
   onSendChat: (event: FormEvent<HTMLFormElement>) => void;
   onReportChatMessage: (message: ChatMessage) => void;
@@ -981,7 +1157,7 @@ function LobbyStage({
   onKickPlayer,
   onChatFilter,
   onTurnTimeLimit,
-  onCustomColor,
+  onVisualColor,
   onChatText,
   onSendChat,
   onReportChatMessage,
@@ -990,9 +1166,11 @@ function LobbyStage({
   onRules,
   onLeave,
 }: LobbyStageProps) {
+  const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const me = state.players.find((player) => player.id === meId);
   const host = state.players.find((player) => player.id === state.hostId);
-  const canAddBot = isHost && state.players.length < 4;
+  const maxPlayers = getMaxPlayersForMode(state.gameMode);
+  const canAddBot = isHost && state.players.length < maxPlayers;
   const activePlayerCount = state.players.filter((player) => player.connected || player.isBot).length;
 
   return (
@@ -1021,7 +1199,7 @@ function LobbyStage({
 
             <div className="lobby-status-strip">
               <span>
-                <strong>{activePlayerCount}/4</strong>
+                <strong>{activePlayerCount}/{maxPlayers}</strong>
                 Plätze
               </span>
               <span>
@@ -1061,14 +1239,18 @@ function LobbyStage({
                 </select>
               </label>
               {me ? (
-                <label>
-                  Eigene Farbe
-                  <input
-                    type="color"
-                    value={getPlayerVisualColor(me)}
-                    onChange={(event) => onCustomColor(event.target.value)}
+                <button
+                  type="button"
+                  className="button-secondary color-picker-button"
+                  onClick={() => setColorPickerOpen(true)}
+                >
+                  <span
+                    className="color-picker-button__dot"
+                    style={{ "--swatch-color": getPlayerVisualColor(me) } as CSSProperties}
+                    aria-hidden="true"
                   />
-                </label>
+                  Farbe: {getPlayerVisualColorLabel(me)}
+                </button>
               ) : null}
             </div>
 
@@ -1108,6 +1290,18 @@ function LobbyStage({
           />
         </section>
       </div>
+      {me && colorPickerOpen ? (
+        <ColorPickerDialog
+          value={getPlayerVisualColorPreset(me)}
+          colors={PLAYER_COLORS}
+          unavailableColors={[]}
+          onChange={(color) => {
+            onVisualColor(color);
+            setColorPickerOpen(false);
+          }}
+          onClose={() => setColorPickerOpen(false)}
+        />
+      ) : null}
     </section>
   );
 }
@@ -1363,13 +1557,13 @@ function GameSettingsDock({
   diceRollStats,
 }: {
   preferences: PlayerPreferences;
-  onPreferencesChange: (preferences: PlayerPreferences) => void;
+  onPreferencesChange: PlayerPreferencesSetter;
   diceRollStats: DiceRollStats;
 }) {
   const [open, setOpen] = useState(false);
   const diceOdds = useMemo(() => getPersonalDiceOdds(diceRollStats), [diceRollStats]);
   const updatePreference = (patch: Partial<PlayerPreferences>) => {
-    onPreferencesChange({ ...preferences, ...patch });
+    onPreferencesChange((current) => ({ ...current, ...patch }));
   };
 
   return (
@@ -1416,24 +1610,117 @@ function GameSettingsDock({
   );
 }
 
+function AdminDock({ room, state, meId }: { room: Room; state: GameStateSnapshot; meId: string }) {
+  const [open, setOpen] = useState(false);
+  const me = state.players.find((player) => player.id === meId);
+  const activePlayer = state.players[state.currentPlayerIndex];
+  const moderationTargets = state.players.filter((player) => player.id !== meId);
+
+  const setDiceBias = (mode: AdminDiceBias) => {
+    room.send("adminSetDiceBias", { mode });
+  };
+
+  const forceDice = (value: number) => {
+    room.send("adminForceDice", { value });
+  };
+
+  const skipTurn = () => {
+    room.send("adminSkipTurn", {});
+  };
+
+  const kickPlayer = (playerId: string) => {
+    room.send("adminKickPlayer", { playerId });
+  };
+
+  const banPlayerIp = (player: PlayerState) => {
+    if (window.confirm(`${player.name} per IP sperren?`)) {
+      room.send("adminBanPlayerIp", { playerId: player.id });
+    }
+  };
+
+  return (
+    <div className="admin-dock">
+      <button
+        className="admin-dock__button"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        aria-label="Admin-Menue"
+        title="Admin-Menue"
+      >
+        <AdminIcon />
+      </button>
+      {open ? (
+        <section className="admin-dock__panel" aria-label="Admin-Menue">
+          <div className="admin-dock__head">
+            <div>
+              <p className="eyebrow">Admin</p>
+              <h2>Cheats</h2>
+            </div>
+            <span>{me?.name || "Du"}</span>
+          </div>
+
+          <div className="admin-section">
+            <p className="admin-section__title">Wuerfel</p>
+            <div className="admin-button-grid">
+              <button type="button" onClick={() => setDiceBias("normal")}>Normal</button>
+              <button type="button" onClick={() => setDiceBias("high")}>Hohe Wuerfe</button>
+              <button type="button" onClick={() => setDiceBias("six")}>Immer 6</button>
+              <button type="button" onClick={() => forceDice(6)}>Naechste 6</button>
+            </div>
+          </div>
+
+          <div className="admin-section">
+            <p className="admin-section__title">Runde</p>
+            <button
+              className="admin-wide-button"
+              type="button"
+              disabled={state.status !== "playing"}
+              onClick={skipTurn}
+            >
+              {activePlayer ? `${activePlayer.name} ueberspringen` : "Zug ueberspringen"}
+            </button>
+          </div>
+
+          <div className="admin-section">
+            <p className="admin-section__title">Spieler</p>
+            <div className="admin-player-list">
+              {moderationTargets.length === 0 ? <p className="empty-chat">Keine Ziele.</p> : null}
+              {moderationTargets.map((player) => (
+                <div key={player.id} className="admin-player-row">
+                  <span className="color-dot" style={{ background: getPlayerVisualColor(player) }} />
+                  <span>{player.name}</span>
+                  <button type="button" onClick={() => kickPlayer(player.id)}>Raus</button>
+                  <button type="button" disabled={player.isBot} onClick={() => banPlayerIp(player)}>
+                    IP sperren
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 function AudioPlayer({
   preferences,
   onPreferencesChange,
 }: {
   preferences: PlayerPreferences;
-  onPreferencesChange: (preferences: PlayerPreferences) => void;
+  onPreferencesChange: PlayerPreferencesSetter;
 }) {
   const audio = getSharedMusicAudio();
   const [open, setOpen] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  const hasMusicTracks = musicAssets.length > 0;
-  const currentTrack = hasMusicTracks ? musicAssets[getTrackIndex(preferences.musicTrackIndex)] : null;
+  const currentTrack = musicAssets[getTrackIndex(preferences.musicTrackIndex)];
   const updatePreference = (patch: Partial<PlayerPreferences>) => {
-    onPreferencesChange({ ...preferences, ...patch });
+    onPreferencesChange((current) => ({ ...current, ...patch }));
   };
   const playCurrentTrack = () => {
-    if (!audio || !currentTrack) {
+    if (!audio) {
       return;
     }
 
@@ -1443,21 +1730,13 @@ function AudioPlayer({
     });
   };
   const changeTrack = (direction: 1 | -1) => {
-    if (!hasMusicTracks) {
-      return;
-    }
-
-    updatePreference({
+    onPreferencesChange((current) => ({
+      ...current,
       musicEnabled: true,
-      musicTrackIndex: wrapTrackIndex(preferences.musicTrackIndex + direction),
-    });
+      musicTrackIndex: wrapTrackIndex(current.musicTrackIndex + direction),
+    }));
   };
   const toggleMusic = () => {
-    if (!hasMusicTracks) {
-      updatePreference({ musicEnabled: false });
-      return;
-    }
-
     if (!audio) {
       updatePreference({ musicEnabled: !preferences.musicEnabled });
       return;
@@ -1467,22 +1746,22 @@ function AudioPlayer({
       audio.pause();
       updatePreference({ musicEnabled: false });
     } else {
-      updatePreference({ musicEnabled: true });
-      void audio.play().catch(() => updatePreference({ musicEnabled: false }));
+      onPreferencesChange((current) => ({ ...current, musicEnabled: true }));
+      playCurrentTrack();
     }
   };
   const testClickSound = () => playUiSound("confirm", preferences);
 
   useEffect(() => {
-    if (!audio || !currentTrack) {
+    if (!audio || (!open && !preferences.musicEnabled)) {
       return;
     }
 
     audio.volume = clampVolume(preferences.musicVolume);
-  }, [audio, preferences.musicVolume]);
+  }, [audio, open, preferences.musicEnabled, preferences.musicVolume]);
 
   useEffect(() => {
-    if (!audio || !currentTrack) {
+    if (!audio) {
       return;
     }
 
@@ -1498,10 +1777,10 @@ function AudioPlayer({
     if (preferences.musicEnabled) {
       playCurrentTrack();
     }
-  }, [audio, currentTrack?.src, preferences.musicTrackIndex]);
+  }, [audio, currentTrack.src, open, preferences.musicEnabled]);
 
   useEffect(() => {
-    if (!audio || !currentTrack) {
+    if (!audio) {
       return;
     }
 
@@ -1511,7 +1790,7 @@ function AudioPlayer({
     }
 
     playCurrentTrack();
-  }, [audio, currentTrack?.src, preferences.musicEnabled]);
+  }, [audio, preferences.musicEnabled]);
 
   useEffect(() => {
     if (!audio) {
@@ -1560,17 +1839,17 @@ function AudioPlayer({
             <div className="audio-player__topline">
               <div className="audio-player__track">
                 <p className="eyebrow">Radio</p>
-                <strong>{currentTrack?.title || "Audio lokal"}</strong>
-                <span>{currentTrack?.artist || "Keine Musik hinterlegt"}</span>
+                <strong>{currentTrack.title}</strong>
+                <span>{currentTrack.artist}</span>
               </div>
               <div className="audio-player__controls">
-                <button type="button" onClick={() => changeTrack(-1)} aria-label="Vorheriger Track" disabled={!hasMusicTracks}>
+                <button type="button" onClick={() => changeTrack(-1)} aria-label="Vorheriger Track">
                   Zurück
                 </button>
-                <button type="button" className="audio-player__play" onClick={toggleMusic} disabled={!hasMusicTracks}>
+                <button type="button" className="audio-player__play" onClick={toggleMusic}>
                   {preferences.musicEnabled ? "Pause" : "Play"}
                 </button>
-                <button type="button" onClick={() => changeTrack(1)} aria-label="Nächster Track" disabled={!hasMusicTracks}>
+                <button type="button" onClick={() => changeTrack(1)} aria-label="Nächster Track">
                   Skip
                 </button>
               </div>
@@ -1600,7 +1879,7 @@ function AudioPlayer({
                   onChange={(event) => {
                     const clickSoundPreset = event.target.value as ClickSoundPreset;
                     const nextPreferences = { ...preferences, clickSoundPreset };
-                    onPreferencesChange(nextPreferences);
+                    onPreferencesChange((current) => ({ ...current, clickSoundPreset }));
                     playUiSound("toggle", nextPreferences);
                   }}
                 >
@@ -1711,6 +1990,16 @@ function SettingsIcon() {
   );
 }
 
+function AdminIcon() {
+  return (
+    <svg className="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.25 19.25 6v5.35c0 4.65-2.9 7.9-7.25 9.4-4.35-1.5-7.25-4.75-7.25-9.4V6L12 3.25Z" />
+      <path d="M8.5 12.25h7" />
+      <path d="M12 8.75v7" />
+    </svg>
+  );
+}
+
 function RadioIcon() {
   return (
     <svg className="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
@@ -1782,6 +2071,9 @@ interface ChatPanelProps {
 function ChatPanel({ state, chatText, onChatText, onSendChat, onReportMessage }: ChatPanelProps) {
   const chatLogRef = useRef<HTMLDivElement | null>(null);
   const canReportMessages = state.settings.chatFilterEnabled;
+  const latestChatSignature = state.chat.at(-1)
+    ? `${state.chat.at(-1)?.id}:${state.chat.at(-1)?.text}`
+    : "empty";
 
   useEffect(() => {
     const chatLog = chatLogRef.current;
@@ -1789,11 +2081,12 @@ function ChatPanel({ state, chatText, onChatText, onSendChat, onReportMessage }:
       return;
     }
 
-    chatLog.scrollTo({
-      top: chatLog.scrollHeight,
-      behavior: "smooth",
+    const frameId = window.requestAnimationFrame(() => {
+      chatLog.scrollTop = chatLog.scrollHeight;
     });
-  }, [state.chat.length]);
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [latestChatSignature, state.chat.length]);
 
   return (
     <section className="panel-block chat-panel">
@@ -1933,6 +2226,7 @@ function normalizeState(rawState: unknown): GameStateSnapshot {
   return {
     roomId: snapshot.roomId || "",
     hostId: snapshot.hostId || "",
+    gameMode: normalizeGameMode(snapshot.gameMode),
     status: snapshot.status || "lobby",
     players: (snapshot.players || []).map((player) => ({
       ...player,
@@ -2172,47 +2466,21 @@ function getPlayerVisualColor(player: PlayerState): string {
   return normalizeHexColor(player.customColor, COLOR_META[player.color].hex);
 }
 
+function getPlayerVisualColorPreset(player: PlayerState): PlayerColor {
+  const visualHex = getPlayerVisualColor(player).toLowerCase();
+  return PLAYER_COLORS.find((color) => COLOR_META[color].hex.toLowerCase() === visualHex) || player.color;
+}
+
+function getPlayerVisualColorLabel(player: PlayerState): string {
+  return COLOR_META[getPlayerVisualColorPreset(player)].label;
+}
+
 function getPlayerSoftColor(player: PlayerState): string {
   return mixHex(getPlayerVisualColor(player), "#ffffff", 0.78);
 }
 
 function getPieceAssetForPlayer(player: PlayerState): string {
-  const baseHex = COLOR_META[player.color].hex.toLowerCase();
-  const targetHex = getPlayerVisualColor(player).toLowerCase();
-  if (targetHex === baseHex) {
-    return pieceAssets[player.color];
-  }
-
-  const cacheKey = `${player.color}:${targetHex}`;
-  const cached = popupPieceAssetCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const tintedSvg = tintPieceSvg(pieceSvgSources[player.color], targetHex);
-  const dataUri = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(tintedSvg)}`;
-  popupPieceAssetCache.set(cacheKey, dataUri);
-  return dataUri;
-}
-
-function tintPieceSvg(svgSource: string, targetHex: string): string {
-  return svgSource.replace(/fill="(#[0-9a-f]{6})"/gi, (match, fillColor: string) => {
-    const source = hexToRgb(fillColor);
-    const max = Math.max(source.r, source.g, source.b);
-    const min = Math.min(source.r, source.g, source.b);
-    const lightness = (max + min) / 510;
-    const saturation = max === 0 ? 0 : (max - min) / max;
-
-    if (lightness > 0.84 && saturation < 0.18) {
-      return match;
-    }
-
-    const shadedHex = lightness < 0.5
-      ? mixHex(targetHex, "#050505", (0.5 - lightness) * 0.85)
-      : mixHex(targetHex, "#ffffff", (lightness - 0.5) * 0.7);
-
-    return `fill="${shadedHex}"`;
-  });
+  return getPieceAssetForColor(player.color, getPlayerVisualColor(player));
 }
 
 function normalizeHexColor(value: unknown, fallback: string): string {
@@ -2338,6 +2606,14 @@ function getPortalGame(id: PortalGameId): PortalGame | null {
   return PORTAL_GAMES.find((game) => game.id === id) || null;
 }
 
+function normalizeGameMode(value: unknown): GameMode {
+  return value === "singleplayer" || value === "party" ? value : "multiplayer";
+}
+
+function getDefaultColorForMode(mode: GameMode): PlayerColor {
+  return getPlayerColorsForMode(mode)[0] || "blue";
+}
+
 function hasCookieConsent() {
   return getCookieValue(COOKIE_CONSENT_KEY) === "1";
 }
@@ -2392,7 +2668,7 @@ function getSavedPlayerPreferences(): PlayerPreferences {
     return {
       ...DEFAULT_PLAYER_PREFERENCES,
       dragToMove: Boolean(parsed.dragToMove),
-      musicEnabled: false,
+      musicEnabled: Boolean(parsed.musicEnabled),
       musicVolume: clampVolume(parsed.musicVolume, DEFAULT_PLAYER_PREFERENCES.musicVolume),
       musicTrackIndex: wrapTrackIndex(Number.isFinite(parsedTrack) ? parsedTrack : 0),
       clickSoundPreset: isClickSoundPreset(parsed.clickSoundPreset)
@@ -2441,12 +2717,7 @@ function playUiSound(sound: UiSoundName, preferences: PlayerPreferences, volumeS
     return;
   }
 
-  const source = getSoundAsset(sound, preferences.clickSoundPreset);
-  if (!source) {
-    return;
-  }
-
-  const audio = new Audio(source);
+  const audio = new Audio(getSoundAsset(sound, preferences.clickSoundPreset));
   audio.volume = volume;
   audio.playbackRate = getSoundPlaybackRate(sound, preferences.clickSoundPreset);
   void audio.play().catch(() => undefined);
@@ -2455,7 +2726,7 @@ function playUiSound(sound: UiSoundName, preferences: PlayerPreferences, volumeS
 function getSharedMusicAudio() {
   if (!sharedMusicAudio && typeof Audio !== "undefined") {
     sharedMusicAudio = new Audio();
-    sharedMusicAudio.preload = "metadata";
+    sharedMusicAudio.preload = "none";
   }
 
   return sharedMusicAudio;
@@ -2560,10 +2831,6 @@ function getTrackIndex(index: number): number {
 }
 
 function wrapTrackIndex(index: number): number {
-  if (musicAssets.length === 0) {
-    return 0;
-  }
-
   return ((Math.round(index) % musicAssets.length) + musicAssets.length) % musicAssets.length;
 }
 

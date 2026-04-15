@@ -1,4 +1,7 @@
 import { randomInt } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Client } from "@colyseus/core";
 import { Room } from "@colyseus/core";
 import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../../shared/src/chatFilter";
@@ -8,6 +11,9 @@ import {
   MAX_TURN_TIME_LIMIT_MS,
   MIN_TURN_TIME_LIMIT_MS,
   PLAYER_COLORS,
+  getDefaultBotCountForMode,
+  getMaxPlayersForMode,
+  getPlayerColorsForMode,
 } from "../../../shared/src/constants";
 import {
   advanceToNextPlayer,
@@ -21,7 +27,7 @@ import {
   shouldKeepRollingAfterMiss,
   sortPlayersClockwise,
 } from "../../../shared/src/rules";
-import type { ChatMessage, GameStateSnapshot, PlayerColor, PlayerState } from "../../../shared/src/types";
+import type { ChatMessage, GameMode, GameStateSnapshot, PlayerColor, PlayerState } from "../../../shared/src/types";
 import { MenschState, schemaToSnapshot, snapshotToSchema } from "../schema";
 
 interface JoinOptions {
@@ -29,6 +35,7 @@ interface JoinOptions {
   color?: PlayerColor;
   customColor?: string;
   botCount?: number;
+  gameMode?: GameMode;
   strikeRequired?: boolean;
   turnTimeLimitMs?: number;
   reconnectToken?: string;
@@ -45,11 +52,32 @@ interface ChatReportPayload {
   word?: string;
 }
 
+type DiceBiasMode = "normal" | "high" | "six";
+
+interface AdminDiceBiasPayload {
+  mode?: DiceBiasMode;
+  playerId?: string;
+}
+
+interface AdminForceDicePayload {
+  value?: number;
+  playerId?: string;
+}
+
+interface AdminPlayerPayload {
+  playerId?: string;
+}
+
 const CHAT_WINDOW_MS = 8000;
 const CHAT_MESSAGE_LIMIT = 5;
 const BOT_STEP_DELAY_MS = 700;
 const HUMAN_AUTO_STEP_DELAY_MS = 520;
-const GLOBAL_REPORTED_FILTER_TERMS = new Set<string>();
+const ADMIN_CHAT_TRIGGER = "ADMIN!";
+const ADMIN_CENSORED_MESSAGE = "***";
+const RESERVED_PLAYER_NAMES = ["admin", "administrator", "moderator", "mod", "system", "server", "owner"];
+const CHAT_FILTER_DATA_FILE = join(process.cwd(), ".data", "reported-chat-filter-terms.json");
+const GLOBAL_REPORTED_FILTER_TERMS = loadReportedFilterTerms();
+const GLOBAL_BANNED_IPS = new Set<string>();
 
 export class MenschRoom extends Room<{ state: MenschState }> {
   private hostId = "";
@@ -58,14 +86,19 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private readonly kickedPlayerIds = new Set<string>();
   private readonly chatStats = new Map<string, ChatStats>();
   private readonly reportedFilterTerms = GLOBAL_REPORTED_FILTER_TERMS;
+  private readonly adminPlayerIds = new Set<string>();
+  private readonly playerIps = new Map<string, string>();
+  private readonly diceBiasByPlayerId = new Map<string, DiceBiasMode>();
+  private readonly forcedDiceByPlayerId = new Map<string, number>();
   private automationTimeout: { clear: () => void } | null = null;
   private autoPlayPlayerId = "";
 
   onCreate(options: JoinOptions): void {
-    this.maxClients = 4;
+    const gameMode = normalizeGameMode(options.gameMode);
+    this.maxClients = gameMode === "singleplayer" ? 1 : getMaxPlayersForMode(gameMode);
     this.autoDispose = true;
     this.setState(new MenschState());
-    const initialSnapshot = createInitialSnapshot(this.roomId, Boolean(options.strikeRequired));
+    const initialSnapshot = createInitialSnapshot(this.roomId, Boolean(options.strikeRequired), gameMode);
     initialSnapshot.settings.turnTimeLimitMs = clampTurnTimeLimit(options.turnTimeLimitMs);
     snapshotToSchema(initialSnapshot, this.state);
 
@@ -83,6 +116,9 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     });
     this.onMessage("setCustomColor", (client, message: { customColor?: string }) => {
       this.handleCustomColor(client, String(message.customColor || ""));
+    });
+    this.onMessage("setPlayerColor", (client, message: { color?: PlayerColor }) => {
+      this.handlePlayerColor(client, message.color);
     });
     this.onMessage("startGame", (client) => {
       this.handleStartGame(client);
@@ -108,13 +144,39 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     this.onMessage("addBot", (client) => {
       this.handleAddBot(client);
     });
+    this.onMessage("adminSetDiceBias", (client, message: AdminDiceBiasPayload = {}) => {
+      this.handleAdminDiceBias(client, message.mode, String(message.playerId || ""));
+    });
+    this.onMessage("adminForceDice", (client, message: AdminForceDicePayload = {}) => {
+      this.handleAdminForceDice(client, message.value, String(message.playerId || ""));
+    });
+    this.onMessage("adminSkipTurn", (client) => {
+      this.handleAdminSkipTurn(client);
+    });
+    this.onMessage("adminGiveTurn", (client, message: AdminPlayerPayload = {}) => {
+      this.handleAdminGiveTurn(client, String(message.playerId || ""));
+    });
+    this.onMessage("adminResetPlayerPieces", (client, message: AdminPlayerPayload = {}) => {
+      this.handleAdminResetPlayerPieces(client, String(message.playerId || ""));
+    });
+    this.onMessage("adminKickPlayer", (client, message: AdminPlayerPayload = {}) => {
+      this.handleAdminKickPlayer(client, String(message.playerId || ""));
+    });
+    this.onMessage("adminBanPlayerIp", (client, message: AdminPlayerPayload = {}) => {
+      this.handleAdminBanPlayerIp(client, String(message.playerId || ""));
+    });
   }
 
   onJoin(client: Client, options: JoinOptions): void {
     const snapshot = schemaToSnapshot(this.state);
     const reconnectToken = cleanToken(options.reconnectToken);
+    const clientIp = getClientIp(client);
 
-    if (reconnectToken && this.reconnectPlayer(client, snapshot, reconnectToken)) {
+    if (clientIp && GLOBAL_BANNED_IPS.has(clientIp)) {
+      throw new Error("Diese IP ist fuer dieses Spiel gesperrt.");
+    }
+
+    if (reconnectToken && this.reconnectPlayer(client, snapshot, reconnectToken, clientIp)) {
       snapshot.updatedAt = Date.now();
       snapshotToSchema(snapshot, this.state);
       this.sendSessionInfo(client, reconnectToken);
@@ -130,13 +192,14 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       throw new Error("Dieses Spiel läuft bereits.");
     }
 
-    if (snapshot.players.length >= 4) {
+    if (snapshot.players.length >= getMaxPlayersForMode(snapshot.gameMode)) {
       throw new Error("Der Raum ist voll.");
     }
 
-    const availableColors = getAvailableColors(snapshot.players);
-    const requestedColor = isPlayerColor(options.color) ? options.color : undefined;
-    const color = requestedColor && availableColors.includes(requestedColor) ? requestedColor : availableColors[0];
+    const availableColors = getAvailableColors(snapshot.players, snapshot.gameMode);
+    const requestedColor = isPlayerColorForMode(options.color, snapshot.gameMode) ? options.color : undefined;
+    const requestedColorAvailable = Boolean(requestedColor && availableColors.includes(requestedColor));
+    const color = requestedColorAvailable ? requestedColor : availableColors[0];
 
     if (!color) {
       throw new Error("Keine Farbe mehr frei.");
@@ -147,7 +210,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       id: client.sessionId,
       name: playerName,
       color,
-      customColor: cleanCustomColor(options.customColor, COLOR_META[color].hex),
+      customColor: cleanCustomColor(requestedColorAvailable ? options.customColor : COLOR_META[color].hex, COLOR_META[color].hex),
       ready: false,
       connected: true,
       isBot: false,
@@ -163,13 +226,19 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     const playerToken = createId("seat");
     this.playerTokens.set(playerToken, color);
     this.tokenByPlayerId.set(client.sessionId, playerToken);
+    if (clientIp) {
+      this.playerIps.set(client.sessionId, clientIp);
+    }
 
-    const requestedBots = Math.max(0, Math.min(3, Number(options.botCount || 0)));
+    const configuredBotCount = options.botCount === undefined
+      ? getDefaultBotCountForMode(snapshot.gameMode)
+      : Number(options.botCount || 0);
+    const requestedBots = Math.max(0, Math.min(getMaxPlayersForMode(snapshot.gameMode) - 1, configuredBotCount));
     if (snapshot.players.length === 1 && requestedBots > 0) {
       this.addBotsToSnapshot(snapshot, requestedBots);
     }
 
-    snapshot.players = sortPlayersClockwise(snapshot.players);
+    snapshot.players = sortPlayersClockwise(snapshot.players, snapshot.gameMode);
     snapshot.currentPlayerIndex = 0;
     snapshot.lastEvent = `${playerName} ist beigetreten.`;
     addSystemMessage(snapshot, `${playerName} ist dem Spiel beigetreten.`);
@@ -314,6 +383,56 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     snapshotToSchema(snapshot, this.state);
   }
 
+  private handlePlayerColor(client: Client, requestedColor: unknown): void {
+    const snapshot = schemaToSnapshot(this.state);
+    if (snapshot.status !== "lobby") {
+      this.sendError(client, "Die Spielerfarbe kann nur in der Lobby geaendert werden.");
+      return;
+    }
+
+    if (!isPlayerColorForMode(requestedColor, snapshot.gameMode)) {
+      this.sendError(client, "Diese Farbe gibt es nicht.");
+      return;
+    }
+
+    const player = snapshot.players.find((entry) => entry.id === client.sessionId);
+    if (!player || player.isBot) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return;
+    }
+
+    if (player.color === requestedColor) {
+      return;
+    }
+
+    const previousColor = player.color;
+    const colorOwner = snapshot.players.find((entry) => entry.id !== player.id && entry.color === requestedColor);
+    if (colorOwner && !colorOwner.isBot) {
+      this.sendError(client, "Diese Farbe ist schon vergeben.");
+      return;
+    }
+
+    player.color = requestedColor;
+    player.customColor = COLOR_META[requestedColor].hex;
+    player.pieces = createPieces(requestedColor);
+    if (colorOwner) {
+      colorOwner.color = previousColor;
+      colorOwner.customColor = COLOR_META[previousColor].hex;
+      colorOwner.pieces = createPieces(previousColor);
+      colorOwner.name = `${COLOR_META[previousColor].label}-Computer`;
+    }
+    const token = this.tokenByPlayerId.get(player.id);
+    if (token) {
+      this.playerTokens.set(token, requestedColor);
+    }
+    player.ready = false;
+    snapshot.players = sortPlayersClockwise(snapshot.players, snapshot.gameMode);
+    snapshot.currentPlayerIndex = 0;
+    snapshot.lastEvent = `${player.name} spielt jetzt mit ${COLOR_META[requestedColor].label}.`;
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+  }
+
   private handleStartGame(client: Client): void {
     const snapshot = schemaToSnapshot(this.state);
     if (snapshot.status !== "lobby") {
@@ -414,6 +533,22 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
+    if (isAdminTrigger(text)) {
+      this.adminPlayerIds.add(player.id);
+      snapshot.chat.push({
+        id: createId("chat"),
+        playerName: player.name,
+        color: player.color,
+        text: ADMIN_CENSORED_MESSAGE,
+        createdAt: Date.now(),
+      });
+      trimChat(snapshot);
+      snapshot.updatedAt = Date.now();
+      snapshotToSchema(snapshot, this.state);
+      client.send("adminUnlocked", { message: "Admin-Menue freigeschaltet." });
+      return;
+    }
+
     snapshot.chat.push({
       id: createId("chat"),
       playerName: player.name,
@@ -459,6 +594,9 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
     const wasKnown = this.reportedFilterTerms.has(normalizedTerm);
     this.reportedFilterTerms.add(normalizedTerm);
+    if (!wasKnown) {
+      void persistReportedFilterTerms(this.reportedFilterTerms);
+    }
     this.applyActiveChatFilter(snapshot);
     snapshot.lastEvent = wasKnown
       ? "Der gemeldete Begriff war bereits im Chat-Filter."
@@ -503,7 +641,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
-    snapshot.players = sortPlayersClockwise(snapshot.players);
+    snapshot.players = sortPlayersClockwise(snapshot.players, snapshot.gameMode);
     snapshot.lastEvent = "Ein Computerspieler wurde hinzugefügt.";
     addSystemMessage(snapshot, snapshot.lastEvent);
     snapshot.updatedAt = Date.now();
@@ -511,8 +649,127 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     snapshotToSchema(snapshot, this.state);
   }
 
+  private handleAdminDiceBias(client: Client, rawMode: unknown): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return;
+    }
+
+    const mode = rawMode === "high" || rawMode === "six" ? rawMode : "normal";
+    if (mode === "normal") {
+      this.diceBiasByPlayerId.delete(adminPlayer.id);
+    } else {
+      this.diceBiasByPlayerId.set(adminPlayer.id, mode);
+    }
+
+    client.send("adminActionAccepted", {
+      message: mode === "normal"
+        ? "Wuerfelchance wieder normal."
+        : mode === "six"
+          ? "Wuerfelchance gesetzt: immer 6."
+          : "Wuerfelchance gesetzt: hohe Wuerfe.",
+    });
+  }
+
+  private handleAdminForceDice(client: Client, rawValue: unknown): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return;
+    }
+
+    const value = clampDiceValue(rawValue);
+    this.forcedDiceByPlayerId.set(adminPlayer.id, value);
+    client.send("adminActionAccepted", { message: `Naechster eigener Wurf: ${value}.` });
+  }
+
+  private handleAdminSkipTurn(client: Client): void {
+    let snapshot = schemaToSnapshot(this.state);
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return;
+    }
+
+    const activePlayer = getActivePlayer(snapshot);
+    if (snapshot.status !== "playing" || !activePlayer) {
+      this.sendError(client, "Es laeuft gerade kein Zug.");
+      return;
+    }
+
+    const skippedPlayerName = activePlayer.name;
+    snapshot = advanceToNextPlayer(snapshot);
+    this.startTurnWindow(snapshot);
+    snapshot.lastEvent = `${skippedPlayerName} wurde vom Admin uebersprungen. ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
+    addSystemMessage(snapshot, snapshot.lastEvent);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+    client.send("adminActionAccepted", { message: "Zug uebersprungen." });
+  }
+
+  private handleAdminKickPlayer(client: Client, targetPlayerId: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return;
+    }
+
+    const target = snapshot.players.find((player) => player.id === targetPlayerId);
+    if (!target) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return;
+    }
+
+    if (target.id === adminPlayer.id) {
+      this.sendError(client, "Du kannst dich nicht selbst entfernen.");
+      return;
+    }
+
+    this.removePlayerForModeration(snapshot, target, `${target.name} wurde vom Admin entfernt.`);
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+    client.send("adminActionAccepted", { message: `${target.name} entfernt.` });
+  }
+
+  private handleAdminBanPlayerIp(client: Client, targetPlayerId: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return;
+    }
+
+    const target = snapshot.players.find((player) => player.id === targetPlayerId);
+    if (!target) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return;
+    }
+
+    if (target.id === adminPlayer.id) {
+      this.sendError(client, "Du kannst deine eigene IP nicht sperren.");
+      return;
+    }
+
+    if (target.isBot) {
+      this.sendError(client, "Bots haben keine IP.");
+      return;
+    }
+
+    const targetIp = this.playerIps.get(target.id);
+    if (!targetIp) {
+      this.sendError(client, "Fuer diesen Spieler ist keine IP bekannt.");
+      return;
+    }
+
+    GLOBAL_BANNED_IPS.add(targetIp);
+    this.removePlayerForModeration(snapshot, target, `${target.name} wurde vom Admin gesperrt.`);
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+    client.send("adminActionAccepted", { message: `${target.name} gesperrt.` });
+  }
+
   private startGame(snapshot: GameStateSnapshot): void {
-    snapshot.players = sortPlayersClockwise(snapshot.players).map((player) => ({
+    snapshot.players = sortPlayersClockwise(snapshot.players, snapshot.gameMode).map((player) => ({
       ...player,
       customColor: cleanCustomColor(player.customColor, COLOR_META[player.color].hex),
       pieces: createPieces(player.color),
@@ -547,7 +804,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       return;
     }
 
-    const dice = rollDiceValue();
+    const dice = this.rollDiceForPlayer(activePlayer.id);
     snapshot.diceValue = dice;
     snapshot.diceRolled = true;
     snapshot.rollAttempts += 1;
@@ -756,7 +1013,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private addBotsToSnapshot(snapshot: GameStateSnapshot, amount: number): boolean {
     let added = 0;
     for (let index = 0; index < amount; index += 1) {
-      const color = getAvailableColors(snapshot.players)[0];
+      const color = getAvailableColors(snapshot.players, snapshot.gameMode)[0];
       if (!color) {
         break;
       }
@@ -778,7 +1035,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     return added > 0;
   }
 
-  private reconnectPlayer(client: Client, snapshot: GameStateSnapshot, token: string): boolean {
+  private reconnectPlayer(client: Client, snapshot: GameStateSnapshot, token: string, clientIp: string): boolean {
     const color = this.playerTokens.get(token);
     if (!color) {
       return false;
@@ -798,6 +1055,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     }
     this.tokenByPlayerId.delete(previousId);
     this.tokenByPlayerId.set(client.sessionId, token);
+    this.migratePlayerSessionState(previousId, client.sessionId, clientIp);
 
     if (snapshot.hostId === previousId || this.hostId === previousId) {
       this.hostId = client.sessionId;
@@ -820,6 +1078,64 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     }
 
     return filterChatText(text, { extraPhrases: [...this.reportedFilterTerms] });
+  }
+
+  private getAdminPlayer(client: Client, snapshot: GameStateSnapshot): PlayerState | undefined {
+    const player = snapshot.players.find((entry) => entry.id === client.sessionId);
+    if (!player || player.isBot) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return undefined;
+    }
+
+    if (!this.adminPlayerIds.has(client.sessionId)) {
+      this.sendError(client, "Admin-Menue nicht freigeschaltet.");
+      return undefined;
+    }
+
+    return player;
+  }
+
+  private rollDiceForPlayer(playerId: string): number {
+    const forcedDice = this.forcedDiceByPlayerId.get(playerId);
+    if (forcedDice) {
+      this.forcedDiceByPlayerId.delete(playerId);
+      return forcedDice;
+    }
+
+    const bias = this.diceBiasByPlayerId.get(playerId);
+    if (bias === "six") {
+      return 6;
+    }
+
+    if (bias === "high") {
+      return randomInt(4, 7);
+    }
+
+    return rollDiceValue();
+  }
+
+  private migratePlayerSessionState(previousPlayerId: string, nextPlayerId: string, clientIp: string): void {
+    const previousIp = this.playerIps.get(previousPlayerId);
+    this.playerIps.delete(previousPlayerId);
+    if (clientIp || previousIp) {
+      this.playerIps.set(nextPlayerId, clientIp || previousIp || "");
+    }
+
+    if (this.adminPlayerIds.delete(previousPlayerId)) {
+      this.adminPlayerIds.add(nextPlayerId);
+    }
+
+    const diceBias = this.diceBiasByPlayerId.get(previousPlayerId);
+    this.diceBiasByPlayerId.delete(previousPlayerId);
+    if (diceBias) {
+      this.diceBiasByPlayerId.set(nextPlayerId, diceBias);
+    }
+
+    const forcedDice = this.forcedDiceByPlayerId.get(previousPlayerId);
+    this.forcedDiceByPlayerId.delete(previousPlayerId);
+    if (forcedDice) {
+      this.forcedDiceByPlayerId.set(nextPlayerId, forcedDice);
+    }
   }
 
   private applyActiveChatFilter(snapshot: GameStateSnapshot): void {
@@ -854,7 +1170,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
   private removePlayerFromLobby(snapshot: GameStateSnapshot, target: PlayerState, reason: string): void {
     this.deleteTokenForPlayer(target.id);
-    snapshot.players = sortPlayersClockwise(snapshot.players.filter((player) => player.id !== target.id));
+    snapshot.players = sortPlayersClockwise(snapshot.players.filter((player) => player.id !== target.id), snapshot.gameMode);
     snapshot.currentPlayerIndex = 0;
     snapshot.lastEvent = reason;
     addSystemMessage(snapshot, reason);
@@ -901,11 +1217,19 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private deleteTokenForPlayer(playerId: string): void {
     const token = this.tokenByPlayerId.get(playerId);
     if (!token) {
+      this.playerIps.delete(playerId);
+      this.adminPlayerIds.delete(playerId);
+      this.diceBiasByPlayerId.delete(playerId);
+      this.forcedDiceByPlayerId.delete(playerId);
       return;
     }
 
     this.tokenByPlayerId.delete(playerId);
     this.playerTokens.delete(token);
+    this.playerIps.delete(playerId);
+    this.adminPlayerIds.delete(playerId);
+    this.diceBiasByPlayerId.delete(playerId);
+    this.forcedDiceByPlayerId.delete(playerId);
     this.chatStats.delete(token);
   }
 
@@ -1000,28 +1324,49 @@ function trimChat(snapshot: GameStateSnapshot): void {
 }
 
 function cleanPlayerName(value?: string): string {
-  return String(value || "")
+  const name = String(value || "")
     .trim()
     .replace(/\s+/g, " ")
     .slice(0, 24);
+
+  if (!name) {
+    return "";
+  }
+
+  const filteredName = filterChatText(name, { extraPhrases: RESERVED_PLAYER_NAMES });
+  return filteredName === name ? name : "";
 }
 
 function cleanChatText(value: string): string {
   return value.trim().replace(/\s+/g, " ").slice(0, 240);
 }
 
+function isAdminTrigger(value: string): boolean {
+  return value.trim().toUpperCase() === ADMIN_CHAT_TRIGGER;
+}
+
+function clampDiceValue(value: unknown): number {
+  const diceValue = Math.round(Number(value));
+  return Number.isFinite(diceValue) ? Math.max(1, Math.min(6, diceValue)) : 6;
+}
+
+function getClientIp(client: Client): string {
+  const requestClient = client as Client & {
+    ip?: string;
+    request?: {
+      headers?: Record<string, string | string[] | undefined>;
+      socket?: { remoteAddress?: string };
+    };
+  };
+  const forwardedFor = requestClient.request?.headers?.["x-forwarded-for"];
+  const forwardedIp = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
+  const firstForwardedIp = forwardedIp?.split(",")[0]?.trim();
+  return firstForwardedIp || requestClient.ip || requestClient.request?.socket?.remoteAddress || "";
+}
+
 function cleanCustomColor(value: unknown, fallback: string): string {
-  const color = String(value || "").trim();
-  if (/^#[0-9a-f]{6}$/i.test(color)) {
-    return color.toLowerCase();
-  }
-
-  if (/^#[0-9a-f]{3}$/i.test(color)) {
-    const [, r, g, b] = color.toLowerCase();
-    return `#${r}${r}${g}${g}${b}${b}`;
-  }
-
-  return fallback;
+  const color = normalizePresetColor(value);
+  return color || fallback;
 }
 
 function clampTurnTimeLimit(value: unknown): number {
@@ -1047,4 +1392,48 @@ function rollDiceValue(): number {
 
 function isPlayerColor(value: unknown): value is PlayerColor {
   return PLAYER_COLORS.includes(value as PlayerColor);
+}
+
+function isPlayerColorForMode(value: unknown, mode: GameMode): value is PlayerColor {
+  return isPlayerColor(value) && getPlayerColorsForMode(mode).includes(value);
+}
+
+function normalizeGameMode(value: unknown): GameMode {
+  return value === "singleplayer" || value === "party" ? value : "multiplayer";
+}
+
+function normalizePresetColor(value: unknown): string {
+  const color = String(value || "").trim().toLowerCase();
+  return Object.values(COLOR_META).some((entry) => entry.hex.toLowerCase() === color) ? color : "";
+}
+
+function loadReportedFilterTerms(): Set<string> {
+  try {
+    if (!existsSync(CHAT_FILTER_DATA_FILE)) {
+      return new Set();
+    }
+
+    const parsed = JSON.parse(readFileSync(CHAT_FILTER_DATA_FILE, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+
+    return new Set(
+      parsed
+        .map((entry) => normalizeReportedFilterTerm(String(entry || "")))
+        .filter((entry): entry is string => Boolean(entry)),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+async function persistReportedFilterTerms(terms: Set<string>): Promise<void> {
+  const values = [...terms].sort();
+  try {
+    mkdirSync(dirname(CHAT_FILTER_DATA_FILE), { recursive: true });
+    await writeFile(CHAT_FILTER_DATA_FILE, JSON.stringify(values, null, 2), "utf8");
+  } catch {
+    // Moderation reports should not break the room if the local data file is unavailable.
+  }
 }

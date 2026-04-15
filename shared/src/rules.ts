@@ -1,14 +1,10 @@
 import {
-  CLOCKWISE_COLORS,
   DEFAULT_TURN_TIME_LIMIT_MS,
-  FINAL_POSITION,
-  HOME_LENGTH,
   PIECES_PER_PLAYER,
-  PLAYER_COLORS,
-  START_INDEX,
-  TRACK_LENGTH,
+  getBoardConfigForMode,
+  getPlayerColorsForMode,
 } from "./constants";
-import { BASE_POSITION, type GameStateSnapshot, type MoveOption, type MoveResult, type PieceState, type PlayerColor, type PlayerState } from "./types";
+import { BASE_POSITION, type GameMode, type GameStateSnapshot, type MoveOption, type MoveResult, type PieceState, type PlayerColor, type PlayerState } from "./types";
 
 export function createPieces(color: PlayerColor): PieceState[] {
   return Array.from({ length: PIECES_PER_PLAYER }, (_, index) => ({
@@ -19,10 +15,11 @@ export function createPieces(color: PlayerColor): PieceState[] {
   }));
 }
 
-export function createInitialSnapshot(roomId: string, strikeRequired = false): GameStateSnapshot {
+export function createInitialSnapshot(roomId: string, strikeRequired = false, gameMode: GameMode = "multiplayer"): GameStateSnapshot {
   return {
     roomId,
     hostId: "",
+    gameMode,
     status: "lobby",
     players: [],
     currentPlayerIndex: 0,
@@ -44,14 +41,15 @@ export function cloneState(state: GameStateSnapshot): GameStateSnapshot {
   return JSON.parse(JSON.stringify(state)) as GameStateSnapshot;
 }
 
-export function getAvailableColors(players: PlayerState[]): PlayerColor[] {
+export function getAvailableColors(players: PlayerState[], mode: GameMode = "party"): PlayerColor[] {
   const usedColors = new Set(players.map((player) => player.color));
-  return PLAYER_COLORS.filter((color) => !usedColors.has(color));
+  return getPlayerColorsForMode(mode).filter((color) => !usedColors.has(color));
 }
 
-export function sortPlayersClockwise(players: PlayerState[]): PlayerState[] {
+export function sortPlayersClockwise(players: PlayerState[], mode: GameMode = "party"): PlayerState[] {
+  const colors = getBoardConfigForMode(mode).clockwiseColors;
   return [...players].sort(
-    (a, b) => CLOCKWISE_COLORS.indexOf(a.color) - CLOCKWISE_COLORS.indexOf(b.color),
+    (a, b) => colors.indexOf(a.color) - colors.indexOf(b.color),
   );
 }
 
@@ -67,55 +65,58 @@ export function getPlayerByColor(state: GameStateSnapshot, color: PlayerColor): 
   return state.players.find((player) => player.color === color);
 }
 
-export function isTrackPosition(position: number): boolean {
-  return position >= 0 && position < TRACK_LENGTH;
+export function isTrackPosition(position: number, mode: GameMode = "party"): boolean {
+  return position >= 0 && position < getBoardConfigForMode(mode).trackLength;
 }
 
-export function isHomePosition(position: number): boolean {
-  return position >= TRACK_LENGTH && position <= FINAL_POSITION;
+export function isHomePosition(position: number, mode: GameMode = "party"): boolean {
+  const board = getBoardConfigForMode(mode);
+  return position >= board.trackLength && position <= board.finalPosition;
 }
 
-export function getAbsoluteTrackIndex(color: PlayerColor, position: number): number | null {
-  if (!isTrackPosition(position)) {
+export function getAbsoluteTrackIndex(color: PlayerColor, position: number, mode: GameMode = "party"): number | null {
+  const board = getBoardConfigForMode(mode);
+  if (!isTrackPosition(position, mode)) {
     return null;
   }
 
-  return (START_INDEX[color] + position) % TRACK_LENGTH;
+  return (board.startIndex[color] + position) % board.trackLength;
 }
 
-export function isPlayerFinished(player: PlayerState): boolean {
-  return player.pieces.every((piece) => isHomePosition(piece.position));
+export function isPlayerFinished(player: PlayerState, mode: GameMode = "party"): boolean {
+  return player.pieces.every((piece) => isHomePosition(piece.position, mode));
 }
 
-export function hasTrackPiece(player: PlayerState): boolean {
-  return player.pieces.some((piece) => isTrackPosition(piece.position));
+export function hasTrackPiece(player: PlayerState, mode: GameMode = "party"): boolean {
+  return player.pieces.some((piece) => isTrackPosition(piece.position, mode));
 }
 
 export function hasBasePiece(player: PlayerState): boolean {
   return player.pieces.some((piece) => piece.position === BASE_POSITION);
 }
 
-export function areHomePiecesAdvanced(player: PlayerState): boolean {
+export function areHomePiecesAdvanced(player: PlayerState, mode: GameMode = "party"): boolean {
+  const board = getBoardConfigForMode(mode);
   const homeSlots = player.pieces
-    .filter((piece) => isHomePosition(piece.position))
-    .map((piece) => piece.position - TRACK_LENGTH)
+    .filter((piece) => isHomePosition(piece.position, mode))
+    .map((piece) => piece.position - board.trackLength)
     .sort((a, b) => a - b);
 
   if (homeSlots.length === 0) {
     return true;
   }
 
-  const firstExpectedSlot = HOME_LENGTH - homeSlots.length;
+  const firstExpectedSlot = board.homeLength - homeSlots.length;
   return homeSlots.every((slot, index) => slot === firstExpectedSlot + index);
 }
 
-export function canUseThreeRollAttempts(player: PlayerState): boolean {
-  return !hasTrackPiece(player) && hasBasePiece(player) && areHomePiecesAdvanced(player);
+export function canUseThreeRollAttempts(player: PlayerState, mode: GameMode = "party"): boolean {
+  return !hasTrackPiece(player, mode) && hasBasePiece(player) && areHomePiecesAdvanced(player, mode);
 }
 
 export function shouldKeepRollingAfterMiss(state: GameStateSnapshot): boolean {
   const player = getActivePlayer(state);
-  return Boolean(player && canUseThreeRollAttempts(player) && state.rollAttempts < 3);
+  return Boolean(player && canUseThreeRollAttempts(player, state.gameMode) && state.rollAttempts < 3);
 }
 
 export function getLegalMoves(state: GameStateSnapshot): MoveOption[] {
@@ -207,7 +208,7 @@ export function applyMove(state: GameStateSnapshot, pieceId: string): MoveResult
   nextState.legalMoves = [];
   nextState.updatedAt = Date.now();
 
-  if (isPlayerFinished(activePlayer)) {
+  if (isPlayerFinished(activePlayer, nextState.gameMode)) {
     nextState.status = "finished";
     nextState.winnerColor = activePlayer.color;
     nextState.lastEvent = `${activePlayer.name} hat alle Figuren ins Ziel gebracht.`;
@@ -244,7 +245,7 @@ export function advanceToNextPlayer(state: GameStateSnapshot): GameStateSnapshot
 export function resetForRematch(state: GameStateSnapshot): GameStateSnapshot {
   const nextState = cloneState(state);
   nextState.status = "lobby";
-  nextState.players = sortPlayersClockwise(nextState.players).map((player) => ({
+  nextState.players = sortPlayersClockwise(nextState.players, nextState.gameMode).map((player) => ({
     ...player,
     ready: player.isBot,
     customColor: player.customColor,
@@ -281,11 +282,11 @@ function buildMoveForPiece(
     targetPosition = piece.position + dice;
   }
 
-  if (targetPosition > FINAL_POSITION) {
+  if (targetPosition > getBoardConfigForMode(state.gameMode).finalPosition) {
     return null;
   }
 
-  if (isOwnDestinationOccupied(player, piece.id, targetPosition)) {
+  if (isOwnDestinationOccupied(player, piece.id, targetPosition, state.gameMode)) {
     return null;
   }
 
@@ -301,17 +302,18 @@ function isOwnDestinationOccupied(
   player: PlayerState,
   movingPieceId: string,
   targetPosition: number,
+  mode: GameMode,
 ): boolean {
   return player.pieces.some((piece) => {
     if (piece.id === movingPieceId) {
       return false;
     }
 
-    if (isHomePosition(targetPosition)) {
+    if (isHomePosition(targetPosition, mode)) {
       return piece.position === targetPosition;
     }
 
-    if (isTrackPosition(targetPosition)) {
+    if (isTrackPosition(targetPosition, mode)) {
       return piece.position === targetPosition;
     }
 
@@ -324,7 +326,7 @@ function getCapturedPieceIds(
   activeColor: PlayerColor,
   targetPosition: number,
 ): string[] {
-  const targetTrackIndex = getAbsoluteTrackIndex(activeColor, targetPosition);
+  const targetTrackIndex = getAbsoluteTrackIndex(activeColor, targetPosition, state.gameMode);
   if (targetTrackIndex === null) {
     return [];
   }
@@ -336,7 +338,7 @@ function getCapturedPieceIds(
     }
 
     for (const piece of player.pieces) {
-      const pieceTrackIndex = getAbsoluteTrackIndex(player.color, piece.position);
+      const pieceTrackIndex = getAbsoluteTrackIndex(player.color, piece.position, state.gameMode);
       if (pieceTrackIndex === targetTrackIndex) {
         capturedIds.push(piece.id);
       }

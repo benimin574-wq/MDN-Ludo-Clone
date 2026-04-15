@@ -1,5 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Nunito:wght@500;700;800;900&display=swap");
-
 :root {
   --font-body: "Nunito", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: "Baloo 2", "Nunito", ui-sans-serif, system-ui, sans-serif;
@@ -648,6 +646,115 @@ h2 {
   min-height: 18px;
 }
 
+.color-palette {
+  display: grid;
+  gap: 0.45rem;
+  min-width: min(100%, 340px);
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.color-palette legend {
+  padding: 0;
+  font-weight: 800;
+}
+
+.color-palette__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.color-palette__swatch {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  min-height: 42px;
+  align-items: center;
+  gap: 0.42rem;
+  border: 1px solid #b8beb6;
+  padding: 0.38rem 0.48rem;
+  color: #202124;
+  background: var(--swatch-soft, #ffffff);
+  text-align: left;
+}
+
+.color-palette__swatch span {
+  width: 22px;
+  height: 22px;
+  border: 2px solid #202124;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  box-shadow: inset 0 -4px 0 rgb(0 0 0 / 16%);
+}
+
+.color-palette__swatch strong {
+  overflow: hidden;
+  font-size: 0.78rem;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.color-palette__swatch--active {
+  border-color: #202124;
+  box-shadow: 0 0 0 2px rgb(32 33 36 / 14%);
+}
+
+.color-picker-button {
+  display: inline-grid;
+  grid-template-columns: 22px auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.color-picker-button__dot {
+  width: 22px;
+  height: 22px;
+  border: 2px solid #202124;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  box-shadow: inset 0 -4px 0 rgb(0 0 0 / 16%);
+}
+
+.create-mode-dialog,
+.color-picker-dialog {
+  width: min(620px, 100%);
+}
+
+.create-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.create-mode-card {
+  display: grid;
+  min-height: 150px;
+  align-content: center;
+  gap: 0.4rem;
+  border: 1px solid #202124;
+  padding: 0.85rem;
+  color: #202124;
+  background: #ffffff;
+  text-align: left;
+}
+
+.create-mode-card strong {
+  font-size: 1.06rem;
+}
+
+.create-mode-card span {
+  color: #555d54;
+  font-weight: 800;
+}
+
+.create-mode-card small {
+  color: #667064;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .button-row,
 .join-row,
 .top-actions,
@@ -759,6 +866,54 @@ h2 {
   fill: #f5f1dc;
   stroke: #252722;
   stroke-width: 4;
+}
+
+.center-garden__sand {
+  fill: #f5f1dc;
+  stroke: #252722;
+  stroke-width: 4;
+}
+
+.center-garden__path {
+  fill: none;
+  stroke: rgb(92 99 83 / 34%);
+  stroke-linecap: round;
+  stroke-width: 13;
+}
+
+.center-garden__trunk {
+  fill: #8b5d3b;
+  stroke: #252722;
+  stroke-linejoin: round;
+  stroke-width: 4;
+}
+
+.center-garden__branch {
+  fill: none;
+  stroke: #8b5d3b;
+  stroke-linecap: round;
+  stroke-width: 12;
+}
+
+.center-garden__leaf {
+  fill: #f5abc8;
+  stroke: #252722;
+  stroke-width: 3;
+}
+
+.center-garden__leaf--two,
+.center-garden__leaf--four {
+  fill: #f7c3d7;
+}
+
+.center-garden__leaf--three {
+  fill: #ef8fb5;
+}
+
+.center-garden__moon {
+  fill: #f7d23a;
+  stroke: #252722;
+  stroke-width: 3;
 }
 
 .legal-target {
@@ -1580,6 +1735,138 @@ h2 {
   backdrop-filter: blur(10px);
 }
 
+.admin-dock {
+  position: fixed;
+  left: 1rem;
+  bottom: 4.85rem;
+  z-index: 25;
+  display: grid;
+  gap: 0.55rem;
+  justify-items: start;
+}
+
+.admin-dock__button {
+  display: grid;
+  width: 48px;
+  min-width: 48px;
+  height: 48px;
+  min-height: 48px;
+  place-items: center;
+  border: 2px solid #202124;
+  border-radius: 8px;
+  padding: 0;
+  font-size: 0;
+  color: #f7fff7;
+  background: #163c2a;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 22%);
+}
+
+.admin-dock__button .icon-svg {
+  width: 25px;
+  height: 25px;
+}
+
+.admin-dock__button:hover:not(:disabled),
+.admin-dock__button:focus-visible:not(:disabled) {
+  color: #ffffff;
+  background: #1e5a3c;
+}
+
+.admin-dock__panel {
+  display: grid;
+  width: min(380px, calc(100vw - 2rem));
+  max-height: min(620px, calc(100vh - 7rem));
+  gap: 0.8rem;
+  overflow: auto;
+  border: 1px solid #cfd5cd;
+  border-radius: 8px;
+  padding: 0.85rem;
+  color: #202124;
+  background: rgb(255 255 255 / 97%);
+  box-shadow: 0 20px 52px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(10px);
+}
+
+.admin-dock__head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.admin-dock__head h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.admin-dock__head span {
+  max-width: 42%;
+  overflow: hidden;
+  color: #58645a;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-section {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.admin-section__title {
+  margin: 0;
+  color: #58645a;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.admin-button-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.admin-button-grid button,
+.admin-wide-button,
+.admin-player-row button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.admin-wide-button {
+  width: 100%;
+}
+
+.admin-player-list {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.admin-player-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.42rem;
+  min-height: 38px;
+  border: 1px solid #e1e6df;
+  border-radius: 8px;
+  padding: 0.35rem;
+  background: #f7faf6;
+}
+
+.admin-player-row > span:nth-child(2) {
+  overflow: hidden;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .audio-shell {
   position: fixed;
   right: 1rem;
@@ -2103,6 +2390,44 @@ h2 {
   background: #202820;
 }
 
+:root[data-theme="dark"] .color-palette__swatch {
+  border-color: #475149;
+  color: #edf2ec;
+  background:
+    linear-gradient(135deg, rgb(17 23 19 / 72%), color-mix(in srgb, var(--swatch-soft) 26%, #111713));
+}
+
+:root[data-theme="dark"] .color-palette__swatch:hover:not(:disabled) {
+  color: #edf2ec;
+  background:
+    linear-gradient(135deg, rgb(32 40 32 / 84%), color-mix(in srgb, var(--swatch-soft) 32%, #202820));
+}
+
+:root[data-theme="dark"] .color-palette__swatch--active {
+  border-color: #edf2ec;
+  box-shadow: 0 0 0 2px rgb(237 242 236 / 18%);
+}
+
+:root[data-theme="dark"] .color-picker-button__dot {
+  border-color: #edf2ec;
+}
+
+:root[data-theme="dark"] .create-mode-card {
+  border-color: #475149;
+  color: #edf2ec;
+  background: #151b17;
+}
+
+:root[data-theme="dark"] .create-mode-card:hover:not(:disabled) {
+  color: #edf2ec;
+  background: #202820;
+}
+
+:root[data-theme="dark"] .create-mode-card span,
+:root[data-theme="dark"] .create-mode-card small {
+  color: #a7b0a8;
+}
+
 :root[data-theme="dark"] .entry-back-icon {
   border-color: #475149;
   color: #edf2ec;
@@ -2353,14 +2678,17 @@ h2 {
 }
 
 :root[data-theme="dark"] .turn-reminder__close,
-:root[data-theme="dark"] .settings-dock__button {
+:root[data-theme="dark"] .settings-dock__button,
+:root[data-theme="dark"] .admin-dock__button {
   border-color: #475149;
   color: #edf2ec;
   background: #151b17;
 }
 
 :root[data-theme="dark"] .settings-dock__button:hover:not(:disabled),
-:root[data-theme="dark"] .settings-dock__button:focus-visible:not(:disabled) {
+:root[data-theme="dark"] .settings-dock__button:focus-visible:not(:disabled),
+:root[data-theme="dark"] .admin-dock__button:hover:not(:disabled),
+:root[data-theme="dark"] .admin-dock__button:focus-visible:not(:disabled) {
   color: #edf2ec;
   background: #263029;
 }
@@ -2378,11 +2706,22 @@ h2 {
 }
 
 :root[data-theme="dark"] .turn-timer-chip,
-:root[data-theme="dark"] .settings-dock__panel {
+:root[data-theme="dark"] .settings-dock__panel,
+:root[data-theme="dark"] .admin-dock__panel {
   border-color: #3a443b;
   color: #edf2ec;
   background: rgb(17 23 19 / 94%);
   box-shadow: 0 20px 52px rgb(0 0 0 / 46%);
+}
+
+:root[data-theme="dark"] .admin-dock__head span,
+:root[data-theme="dark"] .admin-section__title {
+  color: #a7b0a8;
+}
+
+:root[data-theme="dark"] .admin-player-row {
+  border-color: #3a443b;
+  background: #111713;
 }
 
 :root[data-theme="dark"] .turn-timer-chip span,
@@ -2657,6 +2996,11 @@ h2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .create-mode-grid,
+  .color-palette__grid {
+    grid-template-columns: 1fr;
+  }
+
   .game-tile {
     min-height: 200px;
   }
@@ -2721,6 +3065,18 @@ h2 {
 
   .settings-dock {
     bottom: 12.5rem;
+  }
+
+  .admin-dock {
+    bottom: 16.35rem;
+  }
+
+  .admin-player-row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .admin-player-row button {
+    grid-column: 1 / -1;
   }
 
   .form-grid,

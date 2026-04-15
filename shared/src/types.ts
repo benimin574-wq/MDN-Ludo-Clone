@@ -1,6 +1,7 @@
-export type PlayerColor = "blue" | "yellow" | "green" | "red";
+export type PlayerColor = "red" | "pink" | "violet" | "blue" | "teal" | "green" | "yellow" | "orange";
 
 export type GameStatus = "lobby" | "playing" | "finished";
+export type GameMode = "singleplayer" | "multiplayer" | "party";
 
 export const BASE_POSITION = -1;
 
@@ -46,6 +47,7 @@ export interface MoveOption {
 export interface GameStateSnapshot {
   roomId: string;
   hostId: string;
+  gameMode: GameMode;
   status: GameStatus;
   players: PlayerState[];
   currentPlayerIndex: number;

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent } from "react";
-import { BASE_COORDS, COLOR_META, HOME_COORDS, START_INDEX, TRACK_COORDS, TRACK_LENGTH } from "../../shared/src/constants";
+import { COLOR_META, getBoardConfigForMode } from "../../shared/src/constants";
 import { getAbsoluteTrackIndex, isHomePosition, isTrackPosition } from "../../shared/src/rules";
 import { BASE_POSITION, type GameStateSnapshot, type PieceState, type PlayerColor } from "../../shared/src/types";
-import { pieceAssets, pieceSvgSources } from "./assets";
+import { getPieceAssetForColor, useTintedPieceAssets } from "./pieceTint";
 
 interface BoardProps {
   state: GameStateSnapshot;
@@ -38,7 +38,7 @@ const GRID_OFFSET = 100;
 const CELL_SIZE = 90;
 const TOKEN_SIZE = 70;
 const DROP_DISTANCE = 76;
-const tintedPieceCache = new Map<string, string>();
+const EMPTY_LEGAL_MOVES: GameStateSnapshot["legalMoves"] = [];
 
 interface DragState {
   pieceId: string;
@@ -58,12 +58,14 @@ export function Board({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [animationNow, setAnimationNow] = useState(() => Date.now());
-  const legalMoves = disabled ? [] : state.legalMoves;
-  const legalPieceIds = new Set(legalMoves.map((move) => move.pieceId));
-  const legalMoveByPiece = new Map(legalMoves.map((move) => [move.pieceId, move]));
-  const legalDestinations = legalMoves.map((move) => getPointForMove(state, move.to));
+  useTintedPieceAssets(state.players);
+  const board = getBoardConfigForMode(state.gameMode);
+  const legalMoves = disabled ? EMPTY_LEGAL_MOVES : state.legalMoves;
+  const legalPieceIds = useMemo(() => new Set(legalMoves.map((move) => move.pieceId)), [legalMoves]);
+  const legalMoveByPiece = useMemo(() => new Map(legalMoves.map((move) => [move.pieceId, move])), [legalMoves]);
+  const legalDestinations = useMemo(() => legalMoves.map((move) => getPointForMove(state, move.to)), [legalMoves, state]);
+  const pieces = useMemo(() => state.players.flatMap((player) => player.pieces), [state.players]);
   const occupiedCounts = new Map<string, number>();
-  const pieces = state.players.flatMap((player) => player.pieces);
 
   useEffect(() => {
     if (!moveAnimation) {
@@ -158,11 +160,11 @@ export function Board({
         onPointerCancel={() => setDragState(null)}
       >
         <rect className="board-bg" x="20" y="20" width="1060" height="1060" rx="8" />
-        {Object.keys(BASE_COORDS).map((color) => (
+        {board.playerColors.map((color) => (
           <BaseYard key={color} state={state} color={color as PlayerColor} />
         ))}
-        {TRACK_COORDS.map((point, index) => {
-          const startColor = getStartColor(index);
+        {board.trackCoords.map((point, index) => {
+          const startColor = getStartColor(state, index);
           const startVisual = startColor ? getVisualColorForSeat(state, startColor) : null;
           return (
             <circle
@@ -176,7 +178,8 @@ export function Board({
             />
           );
         })}
-        {Object.entries(HOME_COORDS).map(([color, points]) => {
+        {board.playerColors.map((color) => {
+          const points = board.homeCoords[color];
           const visual = getVisualColorForSeat(state, color as PlayerColor);
           return points.map((point, index) => (
               <circle
@@ -190,7 +193,7 @@ export function Board({
               />
             ));
         })}
-        <polygon className="center-goal" points="550,470 630,550 550,630 470,550" />
+        {board.id === "party" ? <CenterGarden /> : <ClassicCenter />}
         {legalDestinations.map((point, index) =>
           point ? (
             <circle
@@ -203,8 +206,8 @@ export function Board({
           ) : null,
         )}
         {pieces.map((piece) => {
-          const animatedPoint = getAnimatedPointForPiece(piece, moveAnimation, animationNow);
-          const point = animatedPoint || getPointForPiece(piece);
+          const animatedPoint = getAnimatedPointForPiece(piece, moveAnimation, animationNow, state.gameMode);
+          const point = animatedPoint || getPointForPiece(piece, state.gameMode);
           if (!point) {
             return null;
           }
@@ -276,8 +279,8 @@ export function Board({
           );
         })}
         {captureMarkers.map((marker) => {
-          const point = getPointForPieceAtPosition(marker, marker.position);
-          const targetPoint = BASE_COORDS[marker.color][marker.index];
+          const point = getPointForPieceAtPosition(marker, marker.position, state.gameMode);
+          const targetPoint = board.baseCoords[marker.color][marker.index];
           if (!point || !targetPoint) {
             return null;
           }
@@ -329,14 +332,15 @@ export function Board({
                   preserveAspectRatio="xMidYMid meet"
                 />
               </g>
-              <g
-                className="capture-marker"
-                transform={`translate(${cx} ${cy})`}
-                style={{ "--capture-color": visual.hex } as CSSProperties}
-              >
-                <circle className="capture-marker__burst" r="43" />
-                <path className="capture-marker__slash capture-marker__slash--one" d="M-27 -27 L27 27" />
-                <path className="capture-marker__slash capture-marker__slash--two" d="M27 -27 L-27 27" />
+              <g transform={`translate(${cx} ${cy})`}>
+                <g
+                  className="capture-marker"
+                  style={{ "--capture-color": visual.hex } as CSSProperties}
+                >
+                  <circle className="capture-marker__burst" r="43" />
+                  <path className="capture-marker__slash capture-marker__slash--one" d="M-27 -27 L27 27" />
+                  <path className="capture-marker__slash capture-marker__slash--two" d="M27 -27 L-27 27" />
+                </g>
               </g>
             </g>
           );
@@ -346,8 +350,31 @@ export function Board({
   );
 }
 
+function CenterGarden() {
+  return (
+    <g className="center-garden" aria-hidden="true">
+      <circle className="center-garden__sand" cx="550" cy="550" r="124" />
+      <path className="center-garden__path" d="M445 586 C492 558 506 520 550 516 C594 520 608 558 655 586" />
+      <path className="center-garden__trunk" d="M528 631 C541 594 538 559 532 520 C559 558 562 593 573 631 Z" />
+      <path className="center-garden__branch" d="M546 550 C510 530 492 504 475 474" />
+      <path className="center-garden__branch" d="M552 544 C596 532 623 505 642 476" />
+      <path className="center-garden__branch" d="M545 520 C540 491 546 464 564 438" />
+      <circle className="center-garden__leaf center-garden__leaf--one" cx="482" cy="465" r="42" />
+      <circle className="center-garden__leaf center-garden__leaf--two" cx="533" cy="436" r="48" />
+      <circle className="center-garden__leaf center-garden__leaf--three" cx="594" cy="454" r="44" />
+      <circle className="center-garden__leaf center-garden__leaf--four" cx="638" cy="490" r="37" />
+      <circle className="center-garden__leaf center-garden__leaf--five" cx="500" cy="504" r="35" />
+      <circle className="center-garden__moon" cx="606" cy="604" r="22" />
+    </g>
+  );
+}
+
+function ClassicCenter() {
+  return <polygon className="center-goal" points="550,470 630,550 550,630 470,550" />;
+}
+
 function BaseYard({ state, color }: { state: GameStateSnapshot; color: PlayerColor }) {
-  const points = BASE_COORDS[color];
+  const points = getBoardConfigForMode(state.gameMode).baseCoords[color];
   const visual = getVisualColorForSeat(state, color);
   const xValues = points.map((point) => toSvgCoord(point.x));
   const yValues = points.map((point) => toSvgCoord(point.y));
@@ -389,30 +416,33 @@ function getPointForMove(state: GameStateSnapshot, targetPosition: number) {
     return null;
   }
 
-  if (isHomePosition(targetPosition)) {
-    return HOME_COORDS[activePlayer.color][targetPosition - TRACK_LENGTH];
+  if (isHomePosition(targetPosition, state.gameMode)) {
+    const board = getBoardConfigForMode(state.gameMode);
+    return board.homeCoords[activePlayer.color][targetPosition - board.trackLength];
   }
 
-  const absoluteTrackIndex = getAbsoluteTrackIndex(activePlayer.color, targetPosition);
-  return absoluteTrackIndex === null ? null : TRACK_COORDS[absoluteTrackIndex];
+  const absoluteTrackIndex = getAbsoluteTrackIndex(activePlayer.color, targetPosition, state.gameMode);
+  const board = getBoardConfigForMode(state.gameMode);
+  return absoluteTrackIndex === null ? null : board.trackCoords[absoluteTrackIndex];
 }
 
-function getPointForPiece(piece: PieceState) {
-  return getPointForPieceAtPosition(piece, piece.position);
+function getPointForPiece(piece: PieceState, mode = "party" as GameStateSnapshot["gameMode"]) {
+  return getPointForPieceAtPosition(piece, piece.position, mode);
 }
 
-function getPointForPieceAtPosition(piece: PieceState, position: number) {
+function getPointForPieceAtPosition(piece: PieceState, position: number, mode = "party" as GameStateSnapshot["gameMode"]) {
+  const board = getBoardConfigForMode(mode);
   if (position === BASE_POSITION) {
-    return BASE_COORDS[piece.color][piece.index];
+    return board.baseCoords[piece.color][piece.index];
   }
 
-  if (isHomePosition(position)) {
-    return HOME_COORDS[piece.color][position - TRACK_LENGTH];
+  if (isHomePosition(position, mode)) {
+    return board.homeCoords[piece.color][position - board.trackLength];
   }
 
-  if (isTrackPosition(position)) {
-    const absoluteTrackIndex = getAbsoluteTrackIndex(piece.color, position);
-    return absoluteTrackIndex === null ? null : TRACK_COORDS[absoluteTrackIndex];
+  if (isTrackPosition(position, mode)) {
+    const absoluteTrackIndex = getAbsoluteTrackIndex(piece.color, position, mode);
+    return absoluteTrackIndex === null ? null : board.trackCoords[absoluteTrackIndex];
   }
 
   return null;
@@ -422,6 +452,7 @@ function getAnimatedPointForPiece(
   piece: PieceState,
   animation: PieceMoveAnimation | null,
   now: number,
+  mode: GameStateSnapshot["gameMode"],
 ) {
   if (!animation || animation.pieceId !== piece.id || animation.durationMs <= 0) {
     return null;
@@ -442,8 +473,8 @@ function getAnimatedPointForPiece(
   const fromIndex = Math.floor(segmentProgress);
   const toIndex = Math.min(path.length - 1, fromIndex + 1);
   const localProgress = segmentProgress - fromIndex;
-  const fromPoint = getPointForPieceAtPosition(piece, path[fromIndex]);
-  const toPoint = getPointForPieceAtPosition(piece, path[toIndex]);
+  const fromPoint = getPointForPieceAtPosition(piece, path[fromIndex], mode);
+  const toPoint = getPointForPieceAtPosition(piece, path[toIndex], mode);
 
   if (!fromPoint || !toPoint) {
     return null;
@@ -481,8 +512,9 @@ function easeInOut(value: number): number {
   return value < 0.5 ? 2 * value * value : 1 - ((-2 * value + 2) ** 2) / 2;
 }
 
-function getStartColor(trackIndex: number): PlayerColor | undefined {
-  return Object.entries(START_INDEX).find(([, startIndex]) => startIndex === trackIndex)?.[0] as PlayerColor | undefined;
+function getStartColor(state: GameStateSnapshot, trackIndex: number): PlayerColor | undefined {
+  const board = getBoardConfigForMode(state.gameMode);
+  return board.playerColors.find((color) => board.startIndex[color] === trackIndex);
 }
 
 function getVisualColorForSeat(state: GameStateSnapshot, color: PlayerColor) {
@@ -493,45 +525,6 @@ function getVisualColorForSeat(state: GameStateSnapshot, color: PlayerColor) {
     dark: mixHex(hex, "#101411", 0.42),
     soft: mixHex(hex, "#ffffff", 0.78),
   };
-}
-
-function getPieceAssetForColor(color: PlayerColor, visualHex: string): string {
-  const baseHex = COLOR_META[color].hex.toLowerCase();
-  const targetHex = normalizeHexColor(visualHex, baseHex).toLowerCase();
-  if (targetHex === baseHex) {
-    return pieceAssets[color];
-  }
-
-  const cacheKey = `${color}:${targetHex}`;
-  const cached = tintedPieceCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
-  const tintedSvg = tintPieceSvg(pieceSvgSources[color], targetHex);
-  const dataUri = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(tintedSvg)}`;
-  tintedPieceCache.set(cacheKey, dataUri);
-  return dataUri;
-}
-
-function tintPieceSvg(svgSource: string, targetHex: string): string {
-  return svgSource.replace(/fill="(#[0-9a-f]{6})"/gi, (match, fillColor: string) => {
-    const source = hexToRgb(fillColor);
-    const max = Math.max(source.r, source.g, source.b);
-    const min = Math.min(source.r, source.g, source.b);
-    const lightness = (max + min) / 510;
-    const saturation = max === 0 ? 0 : (max - min) / max;
-
-    if (lightness > 0.84 && saturation < 0.18) {
-      return match;
-    }
-
-    const shadedHex = lightness < 0.5
-      ? mixHex(targetHex, "#050505", (0.5 - lightness) * 0.85)
-      : mixHex(targetHex, "#ffffff", (lightness - 0.5) * 0.7);
-
-    return `fill="${shadedHex}"`;
-  });
 }
 
 function normalizeHexColor(value: unknown, fallback: string): string {
