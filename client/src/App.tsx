@@ -35,10 +35,10 @@ const RANDOM_NAME_PREFIXES = [
   "KäseKönig",
   "KaroKalle",
   "MashaToll",
-  "DummerMaher",
-  "KalteHaut",
+  "RosaRakete",
+  "FlinkerFuchs",
 ];
-const RANDOM_NAME_SUFFIXES = ["69", "83", "17", "404", "7", "21", "99", "11", "42", "58", "2077"];
+const RANDOM_NAME_SUFFIXES = ["83", "17", "404", "7", "21", "99", "11", "42", "58", "2077"];
 const DICE_VALUES = [1, 2, 3, 4, 5, 6] as const;
 const DICE_PIPS: Record<number, number[]> = {
   1: [5],
@@ -196,6 +196,7 @@ export function App() {
   const [selectedGameId, setSelectedGameId] = useState<PortalGameId | null>(null);
   const [createModeOpen, setCreateModeOpen] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminTargetPlayerId, setAdminTargetPlayerId] = useState("");
   const [cookieConsentAccepted, setCookieConsentAccepted] = useState(() => hasCookieConsent());
   const [now, setNow] = useState(() => Date.now());
   const [moveAnimation, setMoveAnimation] = useState<PieceMoveAnimation | null>(null);
@@ -401,6 +402,7 @@ export function App() {
     setChatReportWord("");
     setDiceRollStats(createEmptyDiceRollStats());
     setAdminUnlocked(false);
+    setAdminTargetPlayerId(joinedRoom.sessionId);
     setState(normalizeState(joinedRoom.state));
 
     joinedRoom.onStateChange((nextState) => {
@@ -425,12 +427,12 @@ export function App() {
     joinedRoom.onMessage("adminUnlocked", (message: { message?: string }) => {
       setAdminUnlocked(true);
       setToastTone("success");
-      setErrorMessage(message.message || "Admin-Menue freigeschaltet.");
+      setErrorMessage(message.message || "Admin-Menü freigeschaltet.");
       playSound("confirm");
     });
     joinedRoom.onMessage("adminActionAccepted", (message: { message?: string }) => {
       setToastTone("success");
-      setErrorMessage(message.message || "Admin-Aktion ausgefuehrt.");
+      setErrorMessage(message.message || "Admin-Aktion ausgeführt.");
       playSound("confirm");
     });
     joinedRoom.onMessage("kicked", (message: { message?: string }) => {
@@ -453,6 +455,7 @@ export function App() {
       setChatReportWord("");
       setDiceRollStats(createEmptyDiceRollStats());
       setAdminUnlocked(false);
+      setAdminTargetPlayerId("");
     });
   }
 
@@ -634,6 +637,8 @@ export function App() {
     setChatReportTarget(null);
     setChatReportWord("");
     setSelectedGameId(null);
+    setAdminUnlocked(false);
+    setAdminTargetPlayerId("");
   }
 
   if (!room || !state) {
@@ -692,8 +697,8 @@ export function App() {
                   type="button"
                   className="name-random-button"
                   onClick={rollRandomPlayerName}
-                  aria-label="Zufallsnamen wuerfeln"
-                  title="Zufallsnamen wuerfeln"
+                  aria-label="Zufallsnamen würfeln"
+                  title="Zufallsnamen würfeln"
                 >
                   <span className="mini-dice" aria-hidden="true">
                     <span />
@@ -786,6 +791,9 @@ export function App() {
           onChatText={setChatText}
           onSendChat={sendChat}
           onReportChatMessage={openChatReport}
+          adminUnlocked={adminUnlocked}
+          adminTargetPlayerId={adminTargetPlayerId}
+          onAdminTargetPlayer={setAdminTargetPlayerId}
           themeMode={themeMode}
           onToggleTheme={toggleTheme}
           onRules={() => setRulesOpen(true)}
@@ -795,7 +803,15 @@ export function App() {
           preferences={playerPreferences}
           onPreferencesChange={setPlayerPreferences}
         />
-        {adminUnlocked ? <AdminDock room={room} state={state} meId={room.sessionId} /> : null}
+        {adminUnlocked ? (
+          <AdminDock
+            room={room}
+            state={state}
+            meId={room.sessionId}
+            targetPlayerId={adminTargetPlayerId}
+            onTargetPlayer={setAdminTargetPlayerId}
+          />
+        ) : null}
         {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
         {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
         {rulesOpen ? <RulesDialog onClose={() => setRulesOpen(false)} /> : null}
@@ -821,7 +837,7 @@ export function App() {
           <h1>Mensch ärgere dich nicht</h1>
         </div>
         <div className="top-actions">
-          <RoomCodeBadge roomId={state.roomId} />
+          {state.gameMode !== "singleplayer" ? <RoomCodeBadge roomId={state.roomId} /> : null}
           <ThemeToggle themeMode={themeMode} onToggle={toggleTheme} />
           <button className="button-secondary" onClick={() => setRulesOpen(true)}>
             Regeln
@@ -834,7 +850,14 @@ export function App() {
 
       <section className="game-layout">
         <aside className="players-rail">
-          <PlayersPanel state={state} meId={room.sessionId} hostId={state.hostId} />
+          <PlayersPanel
+            state={state}
+            meId={room.sessionId}
+            hostId={state.hostId}
+            adminSelectable={adminUnlocked}
+            selectedAdminPlayerId={adminTargetPlayerId}
+            onAdminSelectPlayer={setAdminTargetPlayerId}
+          />
         </aside>
 
         <div className="playfield">
@@ -884,7 +907,15 @@ export function App() {
         onPreferencesChange={setPlayerPreferences}
         diceRollStats={diceRollStats}
       />
-      {adminUnlocked ? <AdminDock room={room} state={state} meId={room.sessionId} /> : null}
+      {adminUnlocked ? (
+        <AdminDock
+          room={room}
+          state={state}
+          meId={room.sessionId}
+          targetPlayerId={adminTargetPlayerId}
+          onTargetPlayer={setAdminTargetPlayerId}
+        />
+      ) : null}
       <AudioPlayer
         preferences={playerPreferences}
         onPreferencesChange={setPlayerPreferences}
@@ -1139,6 +1170,9 @@ interface LobbyStageProps {
   onChatText: (value: string) => void;
   onSendChat: (event: FormEvent<HTMLFormElement>) => void;
   onReportChatMessage: (message: ChatMessage) => void;
+  adminUnlocked: boolean;
+  adminTargetPlayerId: string;
+  onAdminTargetPlayer: (playerId: string) => void;
   themeMode: ThemeMode;
   onToggleTheme: () => void;
   onRules: () => void;
@@ -1161,6 +1195,9 @@ function LobbyStage({
   onChatText,
   onSendChat,
   onReportChatMessage,
+  adminUnlocked,
+  adminTargetPlayerId,
+  onAdminTargetPlayer,
   themeMode,
   onToggleTheme,
   onRules,
@@ -1186,10 +1223,12 @@ function LobbyStage({
                 <p className="eyebrow">Lobby</p>
                 <h1>Warten auf Spieler</h1>
               </div>
-              <div className="room-code-box">
-                <span>Code</span>
-                <strong>{state.roomId}</strong>
-              </div>
+              {state.gameMode !== "singleplayer" ? (
+                <div className="room-code-box">
+                  <span>Code</span>
+                  <strong>{state.roomId}</strong>
+                </div>
+              ) : null}
             </div>
             <ThemeToggle themeMode={themeMode} onToggle={onToggleTheme} />
 
@@ -1260,6 +1299,9 @@ function LobbyStage({
               hostId={state.hostId}
               isHost={isHost}
               onKick={onKickPlayer}
+              adminSelectable={adminUnlocked}
+              selectedAdminPlayerId={adminTargetPlayerId}
+              onAdminSelectPlayer={onAdminTargetPlayer}
             />
 
             <div className="lobby-actions">
@@ -1610,22 +1652,48 @@ function GameSettingsDock({
   );
 }
 
-function AdminDock({ room, state, meId }: { room: Room; state: GameStateSnapshot; meId: string }) {
+function AdminDock({
+  room,
+  state,
+  meId,
+  targetPlayerId,
+  onTargetPlayer,
+}: {
+  room: Room;
+  state: GameStateSnapshot;
+  meId: string;
+  targetPlayerId: string;
+  onTargetPlayer: (playerId: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const me = state.players.find((player) => player.id === meId);
   const activePlayer = state.players[state.currentPlayerIndex];
-  const moderationTargets = state.players.filter((player) => player.id !== meId);
+  const targetPlayer = state.players.find((player) => player.id === targetPlayerId) || me || state.players[0];
+
+  useEffect(() => {
+    if (targetPlayer && targetPlayer.id !== targetPlayerId) {
+      onTargetPlayer(targetPlayer.id);
+    }
+  }, [onTargetPlayer, targetPlayer, targetPlayerId]);
 
   const setDiceBias = (mode: AdminDiceBias) => {
-    room.send("adminSetDiceBias", { mode });
+    room.send("adminSetDiceBias", { mode, playerId: targetPlayer?.id });
   };
 
   const forceDice = (value: number) => {
-    room.send("adminForceDice", { value });
+    room.send("adminForceDice", { value, playerId: targetPlayer?.id });
   };
 
   const skipTurn = () => {
     room.send("adminSkipTurn", {});
+  };
+
+  const giveTurn = () => {
+    room.send("adminGiveTurn", { playerId: targetPlayer?.id });
+  };
+
+  const resetPlayerPieces = () => {
+    room.send("adminResetPlayerPieces", { playerId: targetPlayer?.id });
   };
 
   const kickPlayer = (playerId: string) => {
@@ -1645,28 +1713,35 @@ function AdminDock({ room, state, meId }: { room: Room; state: GameStateSnapshot
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
-        aria-label="Admin-Menue"
-        title="Admin-Menue"
+        aria-label="Admin-Menü"
+        title="Admin-Menü"
       >
         <AdminIcon />
       </button>
       {open ? (
-        <section className="admin-dock__panel" aria-label="Admin-Menue">
+        <section className="admin-dock__panel" aria-label="Admin-Menü">
           <div className="admin-dock__head">
             <div>
               <p className="eyebrow">Admin</p>
               <h2>Cheats</h2>
             </div>
-            <span>{me?.name || "Du"}</span>
+            <span>{targetPlayer ? `Ziel: ${targetPlayer.name}` : "Kein Ziel"}</span>
           </div>
 
           <div className="admin-section">
-            <p className="admin-section__title">Wuerfel</p>
+            <p className="admin-section__title">Würfel</p>
             <div className="admin-button-grid">
               <button type="button" onClick={() => setDiceBias("normal")}>Normal</button>
-              <button type="button" onClick={() => setDiceBias("high")}>Hohe Wuerfe</button>
+              <button type="button" onClick={() => setDiceBias("high")}>Hohe Würfe</button>
               <button type="button" onClick={() => setDiceBias("six")}>Immer 6</button>
-              <button type="button" onClick={() => forceDice(6)}>Naechste 6</button>
+              <button type="button" onClick={() => forceDice(6)}>Nächste 6</button>
+            </div>
+            <div className="admin-dice-grid" aria-label="Nächsten Wurf festlegen">
+              {DICE_VALUES.map((value) => (
+                <button key={value} type="button" onClick={() => forceDice(value)}>
+                  {value}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -1675,23 +1750,58 @@ function AdminDock({ room, state, meId }: { room: Room; state: GameStateSnapshot
             <button
               className="admin-wide-button"
               type="button"
+              disabled={state.status !== "playing" || !targetPlayer}
+              onClick={giveTurn}
+            >
+              {targetPlayer ? `${targetPlayer.name} den Zug geben` : "Zug geben"}
+            </button>
+            <button
+              className="admin-wide-button"
+              type="button"
               disabled={state.status !== "playing"}
               onClick={skipTurn}
             >
-              {activePlayer ? `${activePlayer.name} ueberspringen` : "Zug ueberspringen"}
+              {activePlayer ? `${activePlayer.name} überspringen` : "Zug überspringen"}
+            </button>
+            <button
+              className="admin-wide-button"
+              type="button"
+              disabled={!targetPlayer}
+              onClick={resetPlayerPieces}
+            >
+              {targetPlayer ? `${targetPlayer.name} zurücksetzen` : "Figuren zurücksetzen"}
             </button>
           </div>
 
           <div className="admin-section">
-            <p className="admin-section__title">Spieler</p>
+            <p className="admin-section__title">Spieler anklicken</p>
             <div className="admin-player-list">
-              {moderationTargets.length === 0 ? <p className="empty-chat">Keine Ziele.</p> : null}
-              {moderationTargets.map((player) => (
-                <div key={player.id} className="admin-player-row">
+              {state.players.map((player) => (
+                <div
+                  key={player.id}
+                  className={`admin-player-row ${player.id === targetPlayer?.id ? "admin-player-row--selected" : ""}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onTargetPlayer(player.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      onTargetPlayer(player.id);
+                    }
+                  }}
+                >
                   <span className="color-dot" style={{ background: getPlayerVisualColor(player) }} />
-                  <span>{player.name}</span>
-                  <button type="button" onClick={() => kickPlayer(player.id)}>Raus</button>
-                  <button type="button" disabled={player.isBot} onClick={() => banPlayerIp(player)}>
+                  <span>{player.name}{player.id === meId ? " (du)" : ""}</span>
+                  <button type="button" disabled={player.id === meId} onClick={(event) => {
+                    event.stopPropagation();
+                    kickPlayer(player.id);
+                  }}>
+                    Raus
+                  </button>
+                  <button type="button" disabled={player.isBot || player.id === meId} onClick={(event) => {
+                    event.stopPropagation();
+                    banPlayerIp(player);
+                  }}>
                     IP sperren
                   </button>
                 </div>
@@ -2027,9 +2137,21 @@ interface PlayersPanelProps {
   hostId: string;
   isHost?: boolean;
   onKick?: (playerId: string) => void;
+  adminSelectable?: boolean;
+  selectedAdminPlayerId?: string;
+  onAdminSelectPlayer?: (playerId: string) => void;
 }
 
-function PlayersPanel({ state, meId, hostId, isHost = false, onKick }: PlayersPanelProps) {
+function PlayersPanel({
+  state,
+  meId,
+  hostId,
+  isHost = false,
+  onKick,
+  adminSelectable = false,
+  selectedAdminPlayerId = "",
+  onAdminSelectPlayer,
+}: PlayersPanelProps) {
   return (
     <section className="panel-block players-panel">
       <p className="eyebrow">Spieler</p>
@@ -2037,9 +2159,29 @@ function PlayersPanel({ state, meId, hostId, isHost = false, onKick }: PlayersPa
         {state.players.map((player, index) => {
           const active = index === state.currentPlayerIndex && state.status === "playing";
           const canKick = Boolean(isHost && state.status === "lobby" && onKick && player.id !== meId && player.id !== hostId);
+          const selectedForAdmin = adminSelectable && selectedAdminPlayerId === player.id;
+          const rowClassName = [
+            "player-row",
+            active ? "player-row--active" : "",
+            adminSelectable ? "player-row--selectable" : "",
+            selectedForAdmin ? "player-row--admin-selected" : "",
+          ].filter(Boolean).join(" ");
 
           return (
-            <li key={player.id} className={active ? "player-row player-row--active" : "player-row"}>
+            <li
+              key={player.id}
+              className={rowClassName}
+              role={adminSelectable ? "button" : undefined}
+              tabIndex={adminSelectable ? 0 : undefined}
+              title={adminSelectable ? "Als Admin-Ziel auswählen" : undefined}
+              onClick={() => adminSelectable && onAdminSelectPlayer?.(player.id)}
+              onKeyDown={(event) => {
+                if (adminSelectable && (event.key === "Enter" || event.key === " ")) {
+                  event.preventDefault();
+                  onAdminSelectPlayer?.(player.id);
+                }
+              }}
+            >
               <span className="color-dot" style={{ background: getPlayerVisualColor(player) }} />
               <span>
                 {player.name}
@@ -2048,7 +2190,13 @@ function PlayersPanel({ state, meId, hostId, isHost = false, onKick }: PlayersPa
               </span>
               <small>{getPlayerStatus(player.ready, player.connected, player.isBot, active)}</small>
               {canKick ? (
-                <button className="tiny-button" onClick={() => onKick?.(player.id)}>
+                <button
+                  className="tiny-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onKick?.(player.id);
+                  }}
+                >
                   Kick
                 </button>
               ) : null}

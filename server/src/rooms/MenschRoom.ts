@@ -173,7 +173,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     const clientIp = getClientIp(client);
 
     if (clientIp && GLOBAL_BANNED_IPS.has(clientIp)) {
-      throw new Error("Diese IP ist fuer dieses Spiel gesperrt.");
+      throw new Error("Diese IP ist für dieses Spiel gesperrt.");
     }
 
     if (reconnectToken && this.reconnectPlayer(client, snapshot, reconnectToken, clientIp)) {
@@ -205,10 +205,16 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       throw new Error("Keine Farbe mehr frei.");
     }
 
-    const playerName = cleanPlayerName(options.name) || `Spieler ${snapshot.players.length + 1}`;
+    const rawPlayerName = String(options.name || "").trim();
+    const playerName = cleanPlayerName(rawPlayerName, this.reportedFilterTerms);
+    if (rawPlayerName && !playerName) {
+      throw new Error("Dieser Name ist nicht erlaubt.");
+    }
+
+    const resolvedPlayerName = playerName || `Spieler ${snapshot.players.length + 1}`;
     const player: PlayerState = {
       id: client.sessionId,
-      name: playerName,
+      name: resolvedPlayerName,
       color,
       customColor: cleanCustomColor(requestedColorAvailable ? options.customColor : COLOR_META[color].hex, COLOR_META[color].hex),
       ready: false,
@@ -240,8 +246,8 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
     snapshot.players = sortPlayersClockwise(snapshot.players, snapshot.gameMode);
     snapshot.currentPlayerIndex = 0;
-    snapshot.lastEvent = `${playerName} ist beigetreten.`;
-    addSystemMessage(snapshot, `${playerName} ist dem Spiel beigetreten.`);
+    snapshot.lastEvent = `${resolvedPlayerName} ist beigetreten.`;
+    addSystemMessage(snapshot, `${resolvedPlayerName} ist dem Spiel beigetreten.`);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
     this.sendSessionInfo(client, playerToken);
@@ -386,7 +392,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
   private handlePlayerColor(client: Client, requestedColor: unknown): void {
     const snapshot = schemaToSnapshot(this.state);
     if (snapshot.status !== "lobby") {
-      this.sendError(client, "Die Spielerfarbe kann nur in der Lobby geaendert werden.");
+      this.sendError(client, "Die Spielerfarbe kann nur in der Lobby geändert werden.");
       return;
     }
 
@@ -545,7 +551,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
       trimChat(snapshot);
       snapshot.updatedAt = Date.now();
       snapshotToSchema(snapshot, this.state);
-      client.send("adminUnlocked", { message: "Admin-Menue freigeschaltet." });
+      client.send("adminUnlocked", { message: "Admin-Menü freigeschaltet." });
       return;
     }
 
@@ -600,7 +606,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     this.applyActiveChatFilter(snapshot);
     snapshot.lastEvent = wasKnown
       ? "Der gemeldete Begriff war bereits im Chat-Filter."
-      : "Ein gemeldeter Begriff wurde zur Filterliste hinzugefuegt.";
+      : "Ein gemeldeter Begriff wurde zur Filterliste hinzugefügt.";
     addSystemMessage(snapshot, snapshot.lastEvent);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
@@ -649,39 +655,39 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     snapshotToSchema(snapshot, this.state);
   }
 
-  private handleAdminDiceBias(client: Client, rawMode: unknown): void {
+  private handleAdminDiceBias(client: Client, rawMode: unknown, targetPlayerId: string): void {
     const snapshot = schemaToSnapshot(this.state);
-    const adminPlayer = this.getAdminPlayer(client, snapshot);
-    if (!adminPlayer) {
+    const targetPlayer = this.getAdminTargetPlayer(client, snapshot, targetPlayerId);
+    if (!targetPlayer) {
       return;
     }
 
     const mode = rawMode === "high" || rawMode === "six" ? rawMode : "normal";
     if (mode === "normal") {
-      this.diceBiasByPlayerId.delete(adminPlayer.id);
+      this.diceBiasByPlayerId.delete(targetPlayer.id);
     } else {
-      this.diceBiasByPlayerId.set(adminPlayer.id, mode);
+      this.diceBiasByPlayerId.set(targetPlayer.id, mode);
     }
 
     client.send("adminActionAccepted", {
       message: mode === "normal"
-        ? "Wuerfelchance wieder normal."
+        ? `Würfelchance für ${targetPlayer.name} wieder normal.`
         : mode === "six"
-          ? "Wuerfelchance gesetzt: immer 6."
-          : "Wuerfelchance gesetzt: hohe Wuerfe.",
+          ? `Würfelchance für ${targetPlayer.name}: immer 6.`
+          : `Würfelchance für ${targetPlayer.name}: hohe Würfe.`,
     });
   }
 
-  private handleAdminForceDice(client: Client, rawValue: unknown): void {
+  private handleAdminForceDice(client: Client, rawValue: unknown, targetPlayerId: string): void {
     const snapshot = schemaToSnapshot(this.state);
-    const adminPlayer = this.getAdminPlayer(client, snapshot);
-    if (!adminPlayer) {
+    const targetPlayer = this.getAdminTargetPlayer(client, snapshot, targetPlayerId);
+    if (!targetPlayer) {
       return;
     }
 
     const value = clampDiceValue(rawValue);
-    this.forcedDiceByPlayerId.set(adminPlayer.id, value);
-    client.send("adminActionAccepted", { message: `Naechster eigener Wurf: ${value}.` });
+    this.forcedDiceByPlayerId.set(targetPlayer.id, value);
+    client.send("adminActionAccepted", { message: `Nächster Wurf für ${targetPlayer.name}: ${value}.` });
   }
 
   private handleAdminSkipTurn(client: Client): void {
@@ -693,19 +699,73 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
     const activePlayer = getActivePlayer(snapshot);
     if (snapshot.status !== "playing" || !activePlayer) {
-      this.sendError(client, "Es laeuft gerade kein Zug.");
+      this.sendError(client, "Es läuft gerade kein Zug.");
       return;
     }
 
     const skippedPlayerName = activePlayer.name;
     snapshot = advanceToNextPlayer(snapshot);
     this.startTurnWindow(snapshot);
-    snapshot.lastEvent = `${skippedPlayerName} wurde vom Admin uebersprungen. ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
+    snapshot.lastEvent = `${skippedPlayerName} wurde vom Admin übersprungen. ${getActivePlayer(snapshot)?.name || "Niemand"} ist dran.`;
     addSystemMessage(snapshot, snapshot.lastEvent);
     snapshot.updatedAt = Date.now();
     snapshotToSchema(snapshot, this.state);
     this.scheduleTurnAutomation();
-    client.send("adminActionAccepted", { message: "Zug uebersprungen." });
+    client.send("adminActionAccepted", { message: "Zug übersprungen." });
+  }
+
+  private handleAdminGiveTurn(client: Client, targetPlayerId: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const targetPlayer = this.getAdminTargetPlayer(client, snapshot, targetPlayerId);
+    if (!targetPlayer) {
+      return;
+    }
+
+    const targetIndex = snapshot.players.findIndex((player) => player.id === targetPlayer.id);
+    if (snapshot.status !== "playing" || targetIndex < 0) {
+      this.sendError(client, "Der Zug kann nur in einer laufenden Partie vergeben werden.");
+      return;
+    }
+
+    snapshot.currentPlayerIndex = targetIndex;
+    snapshot.diceValue = 0;
+    snapshot.diceRolled = false;
+    snapshot.rollAttempts = 0;
+    snapshot.legalMoves = [];
+    this.startTurnWindow(snapshot);
+    snapshot.lastEvent = `${targetPlayer.name} ist durch den Admin am Zug.`;
+    addSystemMessage(snapshot, snapshot.lastEvent);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+    client.send("adminActionAccepted", { message: `${targetPlayer.name} ist jetzt am Zug.` });
+  }
+
+  private handleAdminResetPlayerPieces(client: Client, targetPlayerId: string): void {
+    const snapshot = schemaToSnapshot(this.state);
+    const targetPlayer = this.getAdminTargetPlayer(client, snapshot, targetPlayerId);
+    if (!targetPlayer) {
+      return;
+    }
+
+    targetPlayer.pieces = createPieces(targetPlayer.color);
+    if (getActivePlayer(snapshot)?.id === targetPlayer.id) {
+      snapshot.diceValue = 0;
+      snapshot.diceRolled = false;
+      snapshot.rollAttempts = 0;
+      snapshot.legalMoves = [];
+    }
+    snapshot.winnerColor = snapshot.winnerColor === targetPlayer.color ? "" : snapshot.winnerColor;
+    if (snapshot.status === "finished") {
+      snapshot.status = "playing";
+      this.startTurnWindow(snapshot);
+    }
+    snapshot.lastEvent = `${targetPlayer.name} wurde vom Admin zurückgesetzt.`;
+    addSystemMessage(snapshot, snapshot.lastEvent);
+    snapshot.updatedAt = Date.now();
+    snapshotToSchema(snapshot, this.state);
+    this.scheduleTurnAutomation();
+    client.send("adminActionAccepted", { message: `${targetPlayer.name} zurückgesetzt.` });
   }
 
   private handleAdminKickPlayer(client: Client, targetPlayerId: string): void {
@@ -757,7 +817,7 @@ export class MenschRoom extends Room<{ state: MenschState }> {
 
     const targetIp = this.playerIps.get(target.id);
     if (!targetIp) {
-      this.sendError(client, "Fuer diesen Spieler ist keine IP bekannt.");
+      this.sendError(client, "Für diesen Spieler ist keine IP bekannt.");
       return;
     }
 
@@ -1088,11 +1148,27 @@ export class MenschRoom extends Room<{ state: MenschState }> {
     }
 
     if (!this.adminPlayerIds.has(client.sessionId)) {
-      this.sendError(client, "Admin-Menue nicht freigeschaltet.");
+      this.sendError(client, "Admin-Menü nicht freigeschaltet.");
       return undefined;
     }
 
     return player;
+  }
+
+  private getAdminTargetPlayer(client: Client, snapshot: GameStateSnapshot, targetPlayerId: string): PlayerState | undefined {
+    const adminPlayer = this.getAdminPlayer(client, snapshot);
+    if (!adminPlayer) {
+      return undefined;
+    }
+
+    const playerId = targetPlayerId || adminPlayer.id;
+    const targetPlayer = snapshot.players.find((player) => player.id === playerId);
+    if (!targetPlayer) {
+      this.sendError(client, "Spieler nicht gefunden.");
+      return undefined;
+    }
+
+    return targetPlayer;
   }
 
   private rollDiceForPlayer(playerId: string): number {
@@ -1323,7 +1399,7 @@ function trimChat(snapshot: GameStateSnapshot): void {
   }
 }
 
-function cleanPlayerName(value?: string): string {
+function cleanPlayerName(value?: string, reportedFilterTerms: ReadonlySet<string> = new Set()): string {
   const name = String(value || "")
     .trim()
     .replace(/\s+/g, " ")
@@ -1333,7 +1409,7 @@ function cleanPlayerName(value?: string): string {
     return "";
   }
 
-  const filteredName = filterChatText(name, { extraPhrases: RESERVED_PLAYER_NAMES });
+  const filteredName = filterChatText(name, { extraPhrases: [...RESERVED_PLAYER_NAMES, ...reportedFilterTerms] });
   return filteredName === name ? name : "";
 }
 
