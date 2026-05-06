@@ -63,6 +63,8 @@ const APPWRITE_DATABASE_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID || "ludo"
 const APPWRITE_ROOMS_COLLECTION_ID = import.meta.env.VITE_APPWRITE_ROOMS_COLLECTION_ID || "rooms";
 const ADMIN_CHAT_TRIGGER = "ADMIN!";
 const ADMIN_CENSORED_MESSAGE = "***";
+const SESSION_STORAGE_KEY = "mensch:appwrite-session-id";
+const SESSION_COOKIE_KEY = "mensch_appwrite_session";
 
 export class AppwriteGameClient {
   private readonly sdk = new AppwriteSdkClient()
@@ -868,14 +870,52 @@ function rollDiceValue(): number {
 }
 
 function getOrCreateSessionId(): string {
-  const key = "mensch:appwrite-session-id";
-  const existing = localStorage.getItem(key);
+  const existing = getStoredSessionId();
   if (existing) {
+    saveSessionId(existing);
     return existing;
   }
   const next = createId("player");
-  localStorage.setItem(key, next);
+  saveSessionId(next);
   return next;
+}
+
+function getStoredSessionId(): string {
+  try {
+    return localStorage.getItem(SESSION_STORAGE_KEY) || getCookieValue(SESSION_COOKIE_KEY);
+  } catch {
+    return getCookieValue(SESSION_COOKIE_KEY);
+  }
+}
+
+function saveSessionId(sessionId: string): void {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  } catch {
+    // Some privacy modes block localStorage; the cookie below is enough for this game session.
+  }
+
+  setCookieValue(SESSION_COOKIE_KEY, sessionId);
+}
+
+function getCookieValue(name: string): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const cookie = document.cookie
+    .split("; ")
+    .find((entry) => entry.startsWith(`${name}=`));
+  return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : "";
+}
+
+function setCookieValue(name: string, value: string): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = `${name}=${encodeURIComponent(value)}; Max-Age=31536000; Path=/; SameSite=Lax${secure}`;
 }
 
 function createRoomCode(): string {
