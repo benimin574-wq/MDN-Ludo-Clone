@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, Dispatch, FormEvent, MutableRefObject, SetStateAction } from "react";
+import { ArrowLeft, BookOpen, Dices, LogOut, Moon, Send, Settings, Shield, Sun, X } from "lucide-react";
 import {
   COLOR_META,
   DEFAULT_TURN_TIME_LIMIT_MS,
@@ -338,15 +339,24 @@ export function App() {
 
   useEffect(() => {
     const activePlayer = state ? state.players[state.currentPlayerIndex] : undefined;
-    if (!room || !state || state.hostId !== room.sessionId || !activePlayer?.isBot || state.status !== "playing") {
+    const shouldAutomate = Boolean(
+      activePlayer &&
+      state?.status === "playing" &&
+      (
+        activePlayer.isBot ||
+        !activePlayer.connected ||
+        Boolean(state.turnDeadlineAt && now >= state.turnDeadlineAt)
+      ),
+    );
+    if (!room || !state || state.hostId !== room.sessionId || !shouldAutomate) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
       void room.playHostAutomation();
-    }, 720);
+    }, activePlayer?.isBot ? 720 : 60);
     return () => window.clearTimeout(timeoutId);
-  }, [room, state]);
+  }, [now, room, state]);
 
   async function createRoom(gameMode: GameMode) {
     setBusy(true);
@@ -494,7 +504,7 @@ export function App() {
   }
 
   function sendVisualColor(color: PlayerColor) {
-    room?.send("setCustomColor", { customColor: COLOR_META[color].hex });
+    room?.send("setPlayerColor", { color, customColor: COLOR_META[color].hex });
   }
 
   function addBot() {
@@ -662,10 +672,6 @@ export function App() {
             onToggleTheme={toggleTheme}
             onSelectGame={selectPortalGame}
           />
-          <AudioPlayer
-            preferences={playerPreferences}
-            onPreferencesChange={setPlayerPreferences}
-          />
           {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
           {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
         </main>
@@ -681,7 +687,7 @@ export function App() {
           aria-label="Zur Spielauswahl"
           title="Zur Spielauswahl"
         >
-          <DoorBackIcon />
+          <ArrowLeft className="icon-svg" />
         </button>
 
         <section className="entry-panel entry-panel--game">
@@ -725,31 +731,39 @@ export function App() {
           </div>
 
           <div className="entry-actions">
-            <button className="entry-primary" disabled={busy} onClick={() => setCreateModeOpen(true)}>
+            <button type="button" className="entry-primary" disabled={busy} onClick={() => setCreateModeOpen(true)}>
               Spiel erstellen
             </button>
-            <button className="button-secondary" onClick={() => setRulesOpen(true)}>
+            <button type="button" className="button-secondary" onClick={() => setRulesOpen(true)}>
+              <BookOpen className="button-icon" />
               Regeln anzeigen
             </button>
           </div>
 
           <div className="entry-join">
             <span>Raum beitreten</span>
-            <div className="join-row">
+            <form
+              className="join-row"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void joinRoomByCode();
+              }}
+            >
               <input
                 value={joinCode}
                 onChange={(event) => setJoinCode(event.target.value)}
                 placeholder="Raumcode"
                 aria-label="Raumcode"
+                enterKeyHint="join"
               />
-              <button className="button-secondary" disabled={busy} onClick={() => joinRoomByCode()}>
+              <button type="submit" className="button-secondary" disabled={busy}>
                 Beitreten
               </button>
-            </div>
+            </form>
           </div>
 
           {savedRoom ? (
-            <button className="button-secondary entry-resume" disabled={busy} onClick={() => joinRoomByCode(savedRoom.roomId)}>
+            <button type="button" className="button-secondary entry-resume" disabled={busy} onClick={() => joinRoomByCode(savedRoom.roomId)}>
               Letzten Raum wieder betreten: {savedRoom.roomId}
             </button>
           ) : null}
@@ -766,10 +780,6 @@ export function App() {
           </div>
         </section>
 
-        <AudioPlayer
-          preferences={playerPreferences}
-          onPreferencesChange={setPlayerPreferences}
-        />
         {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
         {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
         {rulesOpen ? <RulesDialog onClose={() => setRulesOpen(false)} /> : null}
@@ -811,10 +821,6 @@ export function App() {
           onRules={() => setRulesOpen(true)}
           onLeave={leaveRoom}
         />
-        <AudioPlayer
-          preferences={playerPreferences}
-          onPreferencesChange={setPlayerPreferences}
-        />
         {adminUnlocked ? (
           <AdminDock
             room={room}
@@ -851,10 +857,12 @@ export function App() {
         <div className="top-actions">
           {state.gameMode !== "singleplayer" ? <RoomCodeBadge roomId={state.roomId} /> : null}
           <ThemeToggle themeMode={themeMode} onToggle={toggleTheme} />
-          <button className="button-secondary" onClick={() => setRulesOpen(true)}>
+          <button type="button" className="button-secondary" onClick={() => setRulesOpen(true)}>
+            <BookOpen className="button-icon" />
             Regeln
           </button>
-          <button className="button-secondary" onClick={leaveRoom}>
+          <button type="button" className="button-secondary" onClick={leaveRoom}>
+            <LogOut className="button-icon" />
             Verlassen
           </button>
         </div>
@@ -885,6 +893,12 @@ export function App() {
             state={state}
             meId={room.sessionId}
             canRoll={canRoll}
+          />
+          <BoardActionDock
+            state={state}
+            meId={room.sessionId}
+            canRoll={canRoll}
+            onRoll={rollDice}
           />
           <WinnerOverlay state={state} meId={room.sessionId} onRematch={requestRematch} />
         </div>
@@ -928,10 +942,6 @@ export function App() {
           onTargetPlayer={setAdminTargetPlayerId}
         />
       ) : null}
-      <AudioPlayer
-        preferences={playerPreferences}
-        onPreferencesChange={setPlayerPreferences}
-      />
       {errorMessage ? <div className={`toast toast--${toastTone}`}>{errorMessage}</div> : null}
       {!cookieConsentAccepted ? <CookieNotice onAccept={acceptCookies} /> : null}
       {rulesOpen ? <RulesDialog onClose={() => setRulesOpen(false)} /> : null}
@@ -972,7 +982,7 @@ function PortalStage({ themeMode, onToggleTheme, onSelectGame }: PortalStageProp
           <p className="eyebrow">Jetzt spielbar</p>
           <h2 id="portal-feature-title">{featuredGame.title}</h2>
           <p className="lede">{featuredGame.description}</p>
-          <button className="entry-primary portal-feature__button" onClick={() => onSelectGame(featuredGame)}>
+          <button type="button" className="entry-primary portal-feature__button" onClick={() => onSelectGame(featuredGame)}>
             Spiel öffnen
           </button>
         </div>
@@ -1005,7 +1015,7 @@ function PortalStage({ themeMode, onToggleTheme, onSelectGame }: PortalStageProp
 
         <div className="game-grid">
           {PORTAL_GAMES.map((game) => (
-            <button key={game.id} className="game-tile game-tile--ready" onClick={() => onSelectGame(game)}>
+            <button key={game.id} type="button" className="game-tile game-tile--ready" onClick={() => onSelectGame(game)}>
               <span className="game-tile__image">
                 <img src={game.image} alt="" />
               </span>
@@ -1043,7 +1053,7 @@ function CookieNotice({ onAccept }: { onAccept: () => void }) {
         <strong>Cookies erlauben?</strong>
         <p>Wir speichern deine Zustimmung und deinen Namen nur, wenn du ihn änderst.</p>
       </div>
-      <button onClick={onAccept}>Akzeptieren</button>
+      <button type="button" onClick={onAccept}>Akzeptieren</button>
     </aside>
   );
 }
@@ -1221,6 +1231,9 @@ function LobbyStage({
   const maxPlayers = getMaxPlayersForMode(state.gameMode);
   const canAddBot = isHost && state.players.length < maxPlayers;
   const activePlayerCount = state.players.filter((player) => player.connected || player.isBot).length;
+  const unavailableColors = state.players
+    .filter((player) => player.id !== meId)
+    .map((player) => player.color);
 
   return (
     <section className="lobby-stage">
@@ -1317,17 +1330,19 @@ function LobbyStage({
             />
 
             <div className="lobby-actions">
-              <button onClick={onReady}>{me?.ready ? "Bereit zurücknehmen" : "Bereit"}</button>
-              <button className="button-secondary" disabled={!canAddBot} onClick={onAddBot}>
+              <button type="button" onClick={onReady}>{me?.ready ? "Bereit zurücknehmen" : "Bereit"}</button>
+              <button type="button" className="button-secondary" disabled={!canAddBot} onClick={onAddBot}>
                 Computer hinzufügen
               </button>
-              <button disabled={!isHost || Boolean(startBlocker)} onClick={onStartGame}>
+              <button type="button" disabled={!isHost || Boolean(startBlocker)} onClick={onStartGame}>
                 Spiel starten
               </button>
-              <button className="button-secondary" onClick={onRules}>
+              <button type="button" className="button-secondary" onClick={onRules}>
+                <BookOpen className="button-icon" />
                 Regeln
               </button>
-              <button className="button-secondary" onClick={onLeave}>
+              <button type="button" className="button-secondary" onClick={onLeave}>
+                <LogOut className="button-icon" />
                 Verlassen
               </button>
             </div>
@@ -1348,7 +1363,7 @@ function LobbyStage({
         <ColorPickerDialog
           value={getPlayerVisualColorPreset(me)}
           colors={PLAYER_COLORS}
-          unavailableColors={[]}
+          unavailableColors={unavailableColors}
           onChange={(color) => {
             onVisualColor(color);
             setColorPickerOpen(false);
@@ -1392,7 +1407,7 @@ function TurnPanel({ state, meId, canRoll, dragToMove, onRoll, onRematch }: Turn
         <p className="eyebrow">Gewonnen</p>
         <h2>{winner?.name || "Ein Spieler"}</h2>
         <p className="status-line">{state.lastEvent}</p>
-        <button onClick={onRematch}>Revanche</button>
+        <button type="button" onClick={onRematch}>Revanche</button>
       </section>
     );
   }
@@ -1404,7 +1419,8 @@ function TurnPanel({ state, meId, canRoll, dragToMove, onRoll, onRematch }: Turn
       <div className="dice-row">
         <DiceFace value={state.diceValue} active={state.diceRolled} />
         <div className="dice-actions">
-          <button disabled={!canRoll} onClick={onRoll}>
+          <button type="button" disabled={!canRoll} onClick={onRoll}>
+            <Dices className="button-icon" />
             {canRoll ? "Jetzt würfeln" : "Warten"}
           </button>
           <span>{state.diceRolled ? `Gewürfelt: ${state.diceValue}` : "Würfel bereit"}</span>
@@ -1418,6 +1434,43 @@ function TurnPanel({ state, meId, canRoll, dragToMove, onRoll, onRematch }: Turn
       ) : null}
       {activePlayer?.isBot ? <p className="status-line">Der Computer denkt.</p> : null}
     </section>
+  );
+}
+
+function BoardActionDock({
+  state,
+  meId,
+  canRoll,
+  onRoll,
+}: {
+  state: GameStateSnapshot;
+  meId: string;
+  canRoll: boolean;
+  onRoll: () => void;
+}) {
+  const activePlayer = state.players[state.currentPlayerIndex];
+  if (state.status !== "playing" || !activePlayer) {
+    return null;
+  }
+
+  const isMyTurn = activePlayer.id === meId;
+  const style = {
+    "--turn-color": getPlayerVisualColor(activePlayer),
+    "--turn-soft": getPlayerSoftColor(activePlayer),
+  } as CSSProperties;
+
+  return (
+    <div className={`board-dice-float ${isMyTurn ? "board-dice-float--mine" : ""}`} style={style}>
+      <DiceFace value={state.diceValue} active={state.diceRolled} />
+      {isMyTurn ? (
+        <button type="button" disabled={!canRoll} onClick={onRoll}>
+          <Dices className="button-icon" />
+          {canRoll ? "Würfeln" : "Figur wählen"}
+        </button>
+      ) : (
+        <span>{activePlayer.name}</span>
+      )}
+    </div>
   );
 }
 
@@ -1555,10 +1608,11 @@ function TurnReminderPopup({
     <div className="turn-reminder" style={style} role="status" aria-live="assertive">
       <button
         className="turn-reminder__close"
+        type="button"
         onClick={() => setVisible(false)}
         aria-label="Zug-Erinnerung schließen"
       >
-        ×
+        <X className="icon-svg" />
       </button>
       <div className="turn-reminder__art" aria-hidden="true">
         <img src={getPieceAssetForPlayer(activePlayer)} alt="" />
@@ -1624,11 +1678,12 @@ function GameSettingsDock({
     <div className="settings-dock">
       <button
         className="settings-dock__button"
+        type="button"
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-label="Spieler-Einstellungen"
       >
-        <SettingsIcon />
+        <Settings className="icon-svg" />
       </button>
       {open ? (
         <section className="settings-dock__panel" aria-label="Spieler-Einstellungen">
@@ -1728,7 +1783,7 @@ function AdminDock({
         aria-label="Admin-Menü"
         title="Admin-Menü"
       >
-        <AdminIcon />
+        <Shield className="icon-svg" />
       </button>
       {open ? (
         <section className="admin-dock__panel" aria-label="Admin-Menü">
@@ -2061,7 +2116,7 @@ function WinnerOverlay({
         <p className="eyebrow">Spiel beendet</p>
         <h2>{headline}</h2>
         <p>{text}</p>
-        <button className="winner-rematch-button" onClick={onRematch}>
+        <button type="button" className="winner-rematch-button" onClick={onRematch}>
           Revanche
         </button>
       </div>
@@ -2137,8 +2192,9 @@ function RadioIcon() {
 
 function ThemeToggle({ themeMode, onToggle }: { themeMode: ThemeMode; onToggle: () => void }) {
   return (
-    <button className="theme-toggle button-secondary" onClick={onToggle} type="button">
-      {themeMode === "dark" ? "Light Mode" : "Dark Mode"}
+    <button className="theme-toggle button-secondary" onClick={onToggle} type="button" aria-label="Darstellung wechseln">
+      {themeMode === "dark" ? <Sun className="button-icon" /> : <Moon className="button-icon" />}
+      <span>{themeMode === "dark" ? "Hell" : "Dunkel"}</span>
     </button>
   );
 }
@@ -2204,6 +2260,7 @@ function PlayersPanel({
               {canKick ? (
                 <button
                   className="tiny-button"
+                  type="button"
                   onClick={(event) => {
                     event.stopPropagation();
                     onKick?.(player.id);
@@ -2292,8 +2349,12 @@ function ChatPanel({ state, chatText, onChatText, onSendChat, onReportMessage }:
           maxLength={240}
           onChange={(event) => onChatText(event.target.value)}
           placeholder="Nachricht"
+          enterKeyHint="send"
         />
-        <button>Senden</button>
+        <button type="submit">
+          <Send className="button-icon" />
+          Senden
+        </button>
       </form>
     </section>
   );
@@ -2316,7 +2377,7 @@ function ChatReportDialog({ message, word, onWordChange, onSubmit, onClose }: Ch
             <p className="eyebrow">Chat-Report</p>
             <h2>Begriff melden</h2>
           </div>
-          <button className="button-secondary" onClick={onClose}>
+          <button type="button" className="button-secondary" onClick={onClose}>
             Schließen
           </button>
         </div>
@@ -2337,7 +2398,7 @@ function ChatReportDialog({ message, word, onWordChange, onSubmit, onClose }: Ch
             />
           </label>
           <div className="button-row">
-            <button disabled={!word.trim()}>Zur Filterliste hinzufügen</button>
+            <button type="submit" disabled={!word.trim()}>Zur Filterliste hinzufügen</button>
             <button type="button" className="button-secondary" onClick={onClose}>
               Abbrechen
             </button>
@@ -2357,7 +2418,7 @@ function RulesDialog({ onClose }: { onClose: () => void }) {
             <p className="eyebrow">Classic</p>
             <h2>Regeln</h2>
           </div>
-          <button className="button-secondary" onClick={onClose}>
+          <button type="button" className="button-secondary" onClick={onClose}>
             Schließen
           </button>
         </div>

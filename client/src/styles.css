@@ -63,17 +63,16 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background:
-    linear-gradient(135deg, rgb(255 255 255 / 92%), rgb(234 242 236 / 88%)),
-    repeating-linear-gradient(90deg, rgb(32 163 91 / 7%) 0 1px, transparent 1px 96px),
-    repeating-linear-gradient(0deg, rgb(217 47 47 / 5%) 0 1px, transparent 1px 96px),
+    linear-gradient(135deg, rgb(255 255 255 / 94%), rgb(234 242 236 / 90%) 54%, rgb(249 250 240 / 92%)),
     #f3f7f1;
 }
 
 :root[data-theme="dark"] body {
   background:
-    linear-gradient(135deg, rgb(16 20 17 / 74%), rgb(16 20 17 / 56)),
+    linear-gradient(135deg, rgb(6 9 7 / 88%), rgb(15 22 17 / 80)),
     url("../../assets/ChatGPT Image 13. Apr. 2026, 17_44_56.png") center / cover fixed;
 }
 
@@ -93,6 +92,9 @@ button {
   color: #ffffff;
   background: #202124;
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
   transition:
     transform 150ms ease,
     background 150ms ease,
@@ -149,10 +151,10 @@ h2 {
 
 .app-shell {
   width: 100%;
-  height: 100svh;
+  height: auto;
   min-height: 100svh;
   margin: 0 auto;
-  overflow: hidden;
+  overflow: visible;
   padding: 0.75rem;
 }
 
@@ -706,6 +708,7 @@ h2 {
 }
 
 .color-palette__swatch {
+  position: relative;
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
   min-height: 42px;
@@ -716,6 +719,26 @@ h2 {
   color: #202124;
   background: var(--swatch-soft, #ffffff);
   text-align: left;
+}
+
+.color-palette__swatch:disabled {
+  opacity: 0.38;
+  filter: grayscale(0.72);
+}
+
+.color-palette__swatch:disabled::after {
+  position: absolute;
+  right: 0.42rem;
+  bottom: 0.28rem;
+  border-radius: 999px;
+  padding: 0.08rem 0.34rem;
+  color: #202124;
+  background: rgb(255 255 255 / 76%);
+  content: "belegt";
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .color-palette__swatch span {
@@ -820,6 +843,25 @@ h2 {
 
 .button-secondary:hover:not(:disabled) {
   background: #edf1eb;
+}
+
+.button-icon {
+  width: 1.05em;
+  height: 1.05em;
+  flex: 0 0 auto;
+  stroke-width: 2.35;
+}
+
+.top-actions button,
+.lobby-actions button,
+.entry-actions button,
+.dice-actions button,
+.chat-form button,
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
 }
 
 .theme-toggle {
@@ -1377,7 +1419,7 @@ h2 {
   position: fixed;
   right: 1rem;
   bottom: 5.25rem;
-  z-index: 80;
+  z-index: 100;
   width: min(420px, calc(100% - 2rem));
   border: 2px solid #ffffff;
   border-radius: 8px;
@@ -1681,6 +1723,10 @@ h2 {
 .turn-reminder p:last-child {
   color: #40483f;
   font-weight: 800;
+}
+
+.board-dice-float {
+  display: none;
 }
 
 .turn-timer-bar {
@@ -2493,6 +2539,11 @@ h2 {
   box-shadow: 0 0 0 2px rgb(237 242 236 / 18%);
 }
 
+:root[data-theme="dark"] .color-palette__swatch:disabled::after {
+  color: #edf2ec;
+  background: rgb(5 7 6 / 76%);
+}
+
 :root[data-theme="dark"] .color-picker-button__dot {
   border-color: #edf2ec;
 }
@@ -2793,6 +2844,16 @@ h2 {
   color: #dce5dd;
 }
 
+:root[data-theme="dark"] .board-dice-float {
+  color: #edf2ec;
+  background: rgb(16 22 17 / 88%);
+  box-shadow: 0 16px 42px rgb(0 0 0 / 40%);
+}
+
+:root[data-theme="dark"] .board-dice-float span {
+  color: #edf2ec;
+}
+
 :root[data-theme="dark"] .turn-timer-bar {
   background: rgb(17 23 19 / 48%);
 }
@@ -3054,12 +3115,53 @@ h2 {
     padding: 0;
   }
 
+  .lobby-stage {
+    min-height: 100svh;
+    align-items: start;
+    overflow: auto;
+    padding: 0.75rem;
+  }
+
+  .lobby-window {
+    max-height: none;
+    padding: 0.85rem;
+  }
+
+  .lobby-head,
+  .lobby-settings,
+  .lobby-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .room-code-box {
+    min-width: 0;
+    text-align: left;
+  }
+
   .top-bar,
   .button-row,
   .join-row,
   .chat-form {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .top-actions {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .top-actions .room-code-chip {
+    grid-column: 1 / -1;
+  }
+
+  .top-actions button,
+  .entry-actions button,
+  .join-row button,
+  .chat-form button {
+    width: 100%;
   }
 
   .portal-shell {
@@ -3111,17 +3213,83 @@ h2 {
 
   .cookie-notice {
     right: 0.75rem;
-    bottom: 5.75rem;
+    bottom: auto;
     left: 0.75rem;
+    top: 0.75rem;
     width: auto;
+    padding: 0.72rem;
+  }
+
+  .cookie-notice p {
+    font-size: 0.78rem;
+  }
+
+  .cookie-notice button {
+    min-height: 38px;
+    width: 100%;
   }
 
   .dice-row {
     grid-template-columns: 1fr;
   }
 
+  .turn-panel .dice-row {
+    display: none;
+  }
+
   .dice-face {
     justify-self: center;
+  }
+
+  .board-dice-float {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 6;
+    display: grid;
+    justify-items: center;
+    gap: 0.38rem;
+    border: 1px solid color-mix(in srgb, var(--turn-color, #202124) 42%, #ffffff);
+    border-radius: 8px;
+    padding: 0.46rem;
+    color: #202124;
+    background: rgb(255 255 255 / 88%);
+    box-shadow: 0 16px 42px rgb(0 0 0 / 20%);
+    transform: translate(-50%, -50%);
+    backdrop-filter: blur(10px);
+  }
+
+  .board-dice-float .dice-face {
+    width: 58px;
+    height: 58px;
+    padding: 0.48rem;
+    font-size: 1.35rem;
+  }
+
+  .board-dice-float .dice-pip {
+    width: 8px;
+    height: 8px;
+  }
+
+  .board-dice-float button {
+    min-height: 34px;
+    border: 1px solid var(--turn-color, #202124);
+    padding: 0.36rem 0.58rem;
+    color: #ffffff;
+    background: var(--turn-color, #202124);
+    font-size: 0.82rem;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .board-dice-float span {
+    max-width: 120px;
+    overflow: hidden;
+    color: #202124;
+    font-size: 0.72rem;
+    font-weight: 900;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .turn-reminder {
@@ -3130,44 +3298,19 @@ h2 {
     text-align: center;
   }
 
-  .audio-shell {
+  .toast {
     right: 0.75rem;
     bottom: 0.75rem;
     left: 0.75rem;
-  }
-
-  .toast {
-    right: 0.75rem;
-    bottom: 5.75rem;
-    left: 0.75rem;
     width: auto;
-  }
-
-  .audio-player {
-    width: auto;
-    grid-template-columns: 1fr;
-  }
-
-  .audio-player__cover {
-    display: none;
-  }
-
-  .audio-player__topline,
-  .audio-player__bottom {
-    grid-template-columns: 1fr;
-  }
-
-  .audio-player__controls {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .settings-dock {
-    bottom: 12.5rem;
+    bottom: 0.75rem;
   }
 
   .admin-dock {
-    bottom: 16.35rem;
+    bottom: 4.5rem;
   }
 
   .admin-player-row {
@@ -3185,6 +3328,11 @@ h2 {
   .form-grid,
   .side-panel {
     grid-template-columns: 1fr;
+  }
+
+  .chat-log {
+    max-height: 28svh;
+    font-size: 0.86rem;
   }
 
   .entry-head,

@@ -1,5 +1,5 @@
-import { Client as AppwriteSdkClient, Databases, Permission, Role } from "appwrite";
-import { filterChatText } from "../../shared/src/chatFilter";
+import { Client as AppwriteSdkClient, Databases, Permission, Query, Role } from "appwrite";
+import { filterChatText, isReportTermInText, normalizeReportedFilterTerm } from "../../shared/src/chatFilter";
 import {
   COLOR_META,
   DEFAULT_TURN_TIME_LIMIT_MS,
@@ -49,6 +49,7 @@ type MessageCallback = (message: unknown) => void;
 type StateCallback = (state: GameStateSnapshot) => void;
 type LeaveCallback = () => void;
 type MutationResult = { state: GameStateSnapshot; messages?: Array<{ type: string; payload: unknown }> };
+type MutationReducer = (state: GameStateSnapshot) => MutationResult | Promise<MutationResult>;
 
 interface RoomDocument {
   $id: string;
@@ -57,12 +58,20 @@ interface RoomDocument {
   version?: number;
 }
 
+interface FilterTermDocument {
+  $id: string;
+  term?: string;
+  createdAt?: number;
+}
+
 const APPWRITE_ENDPOINT = import.meta.env.VITE_APPWRITE_ENDPOINT || "https://fra.cloud.appwrite.io/v1";
 const APPWRITE_PROJECT_ID = import.meta.env.VITE_APPWRITE_PROJECT_ID || "69fb49590031e1a0072f";
 const APPWRITE_DATABASE_ID = import.meta.env.VITE_APPWRITE_DATABASE_ID || "ludo";
 const APPWRITE_ROOMS_COLLECTION_ID = import.meta.env.VITE_APPWRITE_ROOMS_COLLECTION_ID || "rooms";
+const APPWRITE_FILTER_TERMS_COLLECTION_ID = import.meta.env.VITE_APPWRITE_FILTER_TERMS_COLLECTION_ID || "filterTerms";
 const ADMIN_CHAT_TRIGGER = "ADMIN!";
 const ADMIN_CENSORED_MESSAGE = "***";
+const RESERVED_PLAYER_NAMES = ["admin", "administrator", "moderator", "mod", "system", "server", "owner"];
 const SESSION_STORAGE_KEY = "mensch:appwrite-session-id";
 const SESSION_COOKIE_KEY = "mensch_appwrite_session";
 
@@ -76,16 +85,21 @@ export class AppwriteGameClient {
     const roomId = createRoomCode();
     const sessionId = getOrCreateSessionId();
     const gameMode = normalizeGameMode(options.gameMode);
+    const reportedFilterTerms = await this.getFilterTerms();
     const color = getAvailableColors([], gameMode).includes(options.color as PlayerColor)
       ? options.color as PlayerColor
       : getAvailableColors([], gameMode)[0] || "blue";
-    const playerName = cleanPlayerName(options.name) || "Spieler 1";
+    const rawPlayerName = String(options.name || "").trim();
+    const playerName = cleanPlayerName(rawPlayerName, reportedFilterTerms);
+    if (rawPlayerName && !playerName) {
+      throw new Error("Dieser Name ist nicht erlaubt.");
+    }
     const snapshot = createInitialSnapshot(roomId, Boolean(options.strikeRequired), gameMode);
     snapshot.settings.turnTimeLimitMs = clampTurnTimeLimit(options.turnTimeLimitMs);
     snapshot.hostId = sessionId;
     snapshot.players.push({
       id: sessionId,
-      name: playerName,
+      name: playerName || "Spieler 1",
       color,
       customColor: cleanCustomColor(options.customColor, COLOR_META[color].hex),
       ready: false,
@@ -99,8 +113,8 @@ export class AppwriteGameClient {
       : Number(options.botCount || 0);
     addBotsToSnapshot(snapshot, Math.max(0, Math.min(getMaxPlayersForMode(gameMode) - 1, configuredBotCount)));
     snapshot.players = sortPlayersClockwise(snapshot.players, gameMode);
-    snapshot.lastEvent = `${playerName} ist beigetreten.`;
-    addSystemMessage(snapshot, `${playerName} ist dem Spiel beigetreten.`);
+    snapshot.lastEvent = `${playerName || "Spieler 1"} ist beigetreten.`;
+    addSystemMessage(snapshot, `${playerName || "Spieler 1"} ist dem Spiel beigetreten.`);
     snapshot.updatedAt = Date.now();
 
     await this.databases.createDocument(
@@ -130,7 +144,7 @@ export class AppwriteGameClient {
     const reconnectToken = String(options.reconnectToken || "").trim();
     const document = await this.getRoomDocument(normalizedRoomId);
     const current = parseState(document);
-    const result = joinSnapshot(current, sessionId, reconnectToken, options);
+    const result = joinSnapshot(current, sessionId, reconnectToken, options, await this.getFilterTerms());
     const player = result.players.find((entry) => entry.id === sessionId);
     const token = reconnectToken || createSeatToken(player?.color || "blue");
     await this.databases.updateDocument(
@@ -155,6 +169,10 @@ export class AppwriteGameClient {
       APPWRITE_ROOMS_COLLECTION_ID,
       roomId,
     ) as unknown as RoomDocument;
+  }
+
+  private async getFilterTerms(): Promise<string[]> {
+    return fetchReportedFilterTerms(this.databases);
   }
 }
 
@@ -243,17 +261,17 @@ export class AppwriteRoom {
 
   async playHostAutomation(): Promise<void> {
     const activePlayer = getActivePlayer(this.state);
-    if (!activePlayer || this.state.hostId !== this.sessionId || !activePlayer.isBot) {
+    if (!activePlayer || this.state.hostId !== this.sessionId || !shouldAutomateActivePlayer(this.state, activePlayer)) {
       return;
     }
 
     await this.send("__botStep", {});
   }
 
-  private async mutate(reducer: (state: GameStateSnapshot) => MutationResult): Promise<MutationResult> {
+  private async mutate(reducer: MutationReducer): Promise<MutationResult> {
     const document = await this.getDocument();
     const state = parseState(document);
-    const result = reducer(state);
+    const result = await reducer(state);
     result.state.updatedAt = Date.now();
     await this.databases.updateDocument(
       APPWRITE_DATABASE_ID,
@@ -277,6 +295,10 @@ export class AppwriteRoom {
     ) as unknown as RoomDocument;
   }
 
+  private async getFilterTerms(): Promise<string[]> {
+    return fetchReportedFilterTerms(this.databases);
+  }
+
   private applyState(state: GameStateSnapshot): void {
     this.state = state;
     for (const callback of this.stateCallbacks) {
@@ -290,7 +312,7 @@ export class AppwriteRoom {
     }
   }
 
-  private reduce(type: string, payload: Record<string, unknown>, state: GameStateSnapshot): MutationResult {
+  private async reduce(type: string, payload: Record<string, unknown>, state: GameStateSnapshot): Promise<MutationResult> {
     switch (type) {
       case "toggleReady":
         return { state: setReady(state, this.sessionId, Boolean(payload.ready)) };
@@ -300,6 +322,8 @@ export class AppwriteRoom {
         return { state: hostOnly(state, this.sessionId, (next) => setTurnTimeLimit(next, payload.turnTimeLimitMs)) };
       case "setCustomColor":
         return { state: setCustomColor(state, this.sessionId, payload.customColor) };
+      case "setPlayerColor":
+        return { state: setPlayerColor(state, this.sessionId, payload.color, payload.customColor) };
       case "addBot":
         return { state: hostOnly(state, this.sessionId, addBot) };
       case "startGame":
@@ -311,9 +335,9 @@ export class AppwriteRoom {
       case "movePiece":
         return { state: moveForPlayer(state, this.sessionId, String(payload.pieceId || "")) };
       case "sendChat":
-        return sendChat(state, this.sessionId, String(payload.text || ""));
+        return sendChat(state, this.sessionId, String(payload.text || ""), await this.getFilterTerms());
       case "reportChatWord":
-        return reportChatWord(state, this.sessionId);
+        return reportChatWord(state, this.sessionId, payload, await this.getFilterTerms(), this.databases);
       case "requestRematch":
         return { state: requestRematch(state, this.sessionId) };
       case "__botStep":
@@ -337,25 +361,71 @@ export class AppwriteRoom {
 
   private async markDisconnected(): Promise<void> {
     try {
-      await this.mutate((state) => {
-        const player = state.players.find((entry) => entry.id === this.sessionId);
-        if (!player || player.isBot) {
-          return { state };
-        }
+      const document = await this.getDocument();
+      const state = parseState(document);
+      const player = state.players.find((entry) => entry.id === this.sessionId);
+      if (!player || player.isBot) {
+        return;
+      }
 
+      if (state.status === "lobby") {
+        state.players = sortPlayersClockwise(state.players.filter((entry) => entry.id !== player.id), state.gameMode);
+        state.currentPlayerIndex = 0;
+        state.lastEvent = `${player.name} hat den Raum verlassen.`;
+      } else {
         player.connected = false;
         player.ready = false;
         state.lastEvent = `${player.name} ist offline.`;
-        addSystemMessage(state, state.lastEvent);
-        return { state };
-      });
+      }
+      addSystemMessage(state, state.lastEvent);
+      assignHostIfNeeded(state);
+
+      if (!hasConnectedHumanPlayer(state)) {
+        await this.databases.deleteDocument(
+          APPWRITE_DATABASE_ID,
+          APPWRITE_ROOMS_COLLECTION_ID,
+          this.roomId,
+        );
+        return;
+      }
+
+      state.updatedAt = Date.now();
+      await this.databases.updateDocument(
+        APPWRITE_DATABASE_ID,
+        APPWRITE_ROOMS_COLLECTION_ID,
+        this.roomId,
+        {
+          stateJson: JSON.stringify(state),
+          updatedAt: state.updatedAt,
+          version: Number(document.version || 0) + 1,
+        },
+      );
     } catch {
       // Leaving the page should never block local UI cleanup.
     }
   }
 }
 
-function joinSnapshot(state: GameStateSnapshot, sessionId: string, token: string, options: JoinRoomOptions): GameStateSnapshot {
+function joinSnapshot(
+  state: GameStateSnapshot,
+  sessionId: string,
+  token: string,
+  options: JoinRoomOptions,
+  reportedFilterTerms: readonly string[],
+): GameStateSnapshot {
+  const sameSessionPlayer = state.players.find((player) => !player.isBot && player.id === sessionId);
+  if (sameSessionPlayer) {
+    sameSessionPlayer.connected = true;
+    if (state.status === "lobby") {
+      sameSessionPlayer.ready = false;
+    }
+    assignHostIfNeeded(state);
+    state.lastEvent = `${sameSessionPlayer.name} ist wieder beigetreten.`;
+    addSystemMessage(state, state.lastEvent);
+    state.updatedAt = Date.now();
+    return state;
+  }
+
   const existing = findReconnectPlayer(state, token);
   if (existing) {
     existing.id = sessionId;
@@ -363,9 +433,7 @@ function joinSnapshot(state: GameStateSnapshot, sessionId: string, token: string
     if (state.status === "lobby") {
       existing.ready = false;
     }
-    if (!state.hostId) {
-      state.hostId = sessionId;
-    }
+    assignHostIfNeeded(state);
     state.lastEvent = `${existing.name} ist wieder beigetreten.`;
     addSystemMessage(state, state.lastEvent);
     state.updatedAt = Date.now();
@@ -387,10 +455,15 @@ function joinSnapshot(state: GameStateSnapshot, sessionId: string, token: string
     throw new Error("Keine Farbe mehr frei.");
   }
 
-  const playerName = cleanPlayerName(options.name) || `Spieler ${state.players.length + 1}`;
+  const rawPlayerName = String(options.name || "").trim();
+  const playerName = cleanPlayerName(rawPlayerName, reportedFilterTerms);
+  if (rawPlayerName && !playerName) {
+    throw new Error("Dieser Name ist nicht erlaubt.");
+  }
+  const resolvedPlayerName = playerName || `Spieler ${state.players.length + 1}`;
   state.players.push({
     id: sessionId,
-    name: playerName,
+    name: resolvedPlayerName,
     color,
     customColor: cleanCustomColor(options.customColor, COLOR_META[color].hex),
     ready: false,
@@ -399,8 +472,8 @@ function joinSnapshot(state: GameStateSnapshot, sessionId: string, token: string
     pieces: createPieces(color),
   });
   state.players = sortPlayersClockwise(state.players, state.gameMode);
-  state.lastEvent = `${playerName} ist beigetreten.`;
-  addSystemMessage(state, `${playerName} ist dem Spiel beigetreten.`);
+  state.lastEvent = `${resolvedPlayerName} ist beigetreten.`;
+  addSystemMessage(state, `${resolvedPlayerName} ist dem Spiel beigetreten.`);
   state.updatedAt = Date.now();
   return state;
 }
@@ -435,6 +508,48 @@ function setCustomColor(state: GameStateSnapshot, playerId: string, value: unkno
   player.customColor = cleanCustomColor(value, COLOR_META[player.color].hex);
   player.ready = false;
   state.lastEvent = `${player.name} hat die Spielerfarbe angepasst.`;
+  return state;
+}
+
+function setPlayerColor(
+  state: GameStateSnapshot,
+  playerId: string,
+  requestedColor: unknown,
+  customColor: unknown,
+): GameStateSnapshot {
+  assertLobby(state, "Die Spielerfarbe kann nur in der Lobby geändert werden.");
+  if (!isPlayerColorForMode(requestedColor, state.gameMode)) {
+    throw new Error("Diese Farbe gibt es nicht.");
+  }
+
+  const player = getHumanPlayer(state, playerId);
+  if (player.color === requestedColor) {
+    player.customColor = cleanCustomColor(customColor, COLOR_META[player.color].hex);
+    return state;
+  }
+
+  const previousColor = player.color;
+  const colorOwner = state.players.find((entry) => entry.id !== player.id && entry.color === requestedColor);
+  if (colorOwner && !colorOwner.isBot) {
+    throw new Error("Diese Farbe ist schon vergeben.");
+  }
+
+  player.color = requestedColor;
+  player.customColor = cleanCustomColor(customColor, COLOR_META[requestedColor].hex);
+  player.pieces = createPieces(requestedColor);
+  player.ready = false;
+
+  if (colorOwner) {
+    colorOwner.color = previousColor;
+    colorOwner.customColor = COLOR_META[previousColor].hex;
+    colorOwner.pieces = createPieces(previousColor);
+    colorOwner.name = `${COLOR_META[previousColor].label}-Computer`;
+  }
+
+  state.players = sortPlayersClockwise(state.players, state.gameMode);
+  state.currentPlayerIndex = 0;
+  state.lastEvent = `${player.name} spielt jetzt mit ${COLOR_META[requestedColor].label}.`;
+  addSystemMessage(state, state.lastEvent);
   return state;
 }
 
@@ -579,7 +694,12 @@ function moveActivePiece(state: GameStateSnapshot, pieceId: string): GameStateSn
   return state;
 }
 
-function sendChat(state: GameStateSnapshot, playerId: string, rawText: string): MutationResult {
+function sendChat(
+  state: GameStateSnapshot,
+  playerId: string,
+  rawText: string,
+  reportedFilterTerms: readonly string[],
+): MutationResult {
   const player = state.players.find((entry) => entry.id === playerId);
   const text = rawText.trim().replace(/\s+/g, " ").slice(0, 240);
   if (!player || !text) {
@@ -605,18 +725,66 @@ function sendChat(state: GameStateSnapshot, playerId: string, rawText: string): 
     id: createId("chat"),
     playerName: player.name,
     color: player.color,
-    text: state.settings.chatFilterEnabled ? filterChatText(text) : text,
+    text: filterChatForRoom(text, state, reportedFilterTerms),
     createdAt: Date.now(),
   });
   trimChat(state);
   return { state };
 }
 
-function reportChatWord(state: GameStateSnapshot, _playerId: string): MutationResult {
-  addSystemMessage(state, "Report angenommen. Der Appwrite-Chat nutzt den Basisfilter.");
+async function reportChatWord(
+  state: GameStateSnapshot,
+  playerId: string,
+  payload: Record<string, unknown>,
+  reportedFilterTerms: readonly string[],
+  databases: Databases,
+): Promise<MutationResult> {
+  const reporter = state.players.find((entry) => entry.id === playerId && !entry.isBot);
+  if (!reporter) {
+    throw new Error("Spieler nicht gefunden.");
+  }
+  if (!state.settings.chatFilterEnabled) {
+    throw new Error("Der Chat-Filter ist deaktiviert.");
+  }
+
+  const messageId = String(payload.messageId || "").trim().slice(0, 80);
+  const normalizedTerm = normalizeReportedFilterTerm(String(payload.word || ""));
+  if (!messageId || !normalizedTerm) {
+    throw new Error("Bitte ein Wort aus der Nachricht eintragen.");
+  }
+
+  const targetMessage = state.chat.find((entry) => entry.id === messageId && entry.color !== "system");
+  if (!targetMessage) {
+    throw new Error("Diese Nachricht kann nicht gemeldet werden.");
+  }
+
+  if (!isReportTermInText(targetMessage.text, normalizedTerm)) {
+    throw new Error("Dieses Wort wurde in der Nachricht nicht gefunden.");
+  }
+
+  const terms = new Set(reportedFilterTerms);
+  const wasKnown = terms.has(normalizedTerm);
+  terms.add(normalizedTerm);
+
+  if (!wasKnown) {
+    await createReportedFilterTerm(databases, normalizedTerm);
+  }
+
+  applyActiveChatFilter(state, [...terms]);
+  state.lastEvent = wasKnown
+    ? "Der gemeldete Begriff war bereits im Chat-Filter."
+    : "Ein gemeldeter Begriff wurde zur Filterliste hinzugefügt.";
+  addSystemMessage(state, state.lastEvent);
   return {
     state,
-    messages: [{ type: "reportAccepted", payload: { message: "Report angenommen." } }],
+    messages: [{
+      type: "reportAccepted",
+      payload: {
+        message: wasKnown
+          ? "Report geprüft. Der Begriff war schon im Filter."
+          : "Report angenommen. Der Begriff wird jetzt gefiltert.",
+      },
+    }],
   };
 }
 
@@ -633,7 +801,7 @@ function requestRematch(state: GameStateSnapshot, playerId: string): GameStateSn
 
 function playBotStep(state: GameStateSnapshot): GameStateSnapshot {
   const activePlayer = getActivePlayer(state);
-  if (state.status !== "playing" || !activePlayer?.isBot) {
+  if (state.status !== "playing" || !activePlayer || !shouldAutomateActivePlayer(state, activePlayer)) {
     return state;
   }
   if (!state.diceRolled) {
@@ -835,13 +1003,120 @@ function trimChat(snapshot: GameStateSnapshot): void {
   }
 }
 
+function filterChatForRoom(text: string, snapshot: GameStateSnapshot, reportedFilterTerms: readonly string[]): string {
+  if (!snapshot.settings.chatFilterEnabled) {
+    return text;
+  }
+
+  return filterChatText(text, { extraPhrases: reportedFilterTerms });
+}
+
+function applyActiveChatFilter(snapshot: GameStateSnapshot, reportedFilterTerms: readonly string[]): void {
+  if (!snapshot.settings.chatFilterEnabled) {
+    return;
+  }
+
+  snapshot.chat = snapshot.chat.map((message) => {
+    if (message.color === "system") {
+      return message;
+    }
+
+    return {
+      ...message,
+      text: filterChatForRoom(message.text, snapshot, reportedFilterTerms),
+    };
+  });
+}
+
+function shouldAutomateActivePlayer(snapshot: GameStateSnapshot, activePlayer: PlayerState): boolean {
+  if (snapshot.status !== "playing") {
+    return false;
+  }
+
+  return activePlayer.isBot || !activePlayer.connected || Boolean(snapshot.turnDeadlineAt && Date.now() >= snapshot.turnDeadlineAt);
+}
+
+function assignHostIfNeeded(snapshot: GameStateSnapshot): void {
+  const currentHost = snapshot.players.find((player) => player.id === snapshot.hostId && !player.isBot && player.connected);
+  if (currentHost) {
+    return;
+  }
+
+  snapshot.hostId = snapshot.players.find((player) => !player.isBot && player.connected)?.id || "";
+}
+
+function hasConnectedHumanPlayer(snapshot: GameStateSnapshot): boolean {
+  return snapshot.players.some((player) => !player.isBot && player.connected);
+}
+
+async function fetchReportedFilterTerms(databases: Databases): Promise<string[]> {
+  try {
+    const response = await databases.listDocuments(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_FILTER_TERMS_COLLECTION_ID,
+      [Query.limit(200)],
+    ) as unknown as { documents?: FilterTermDocument[] };
+
+    return [...new Set((response.documents || [])
+      .map((document) => normalizeReportedFilterTerm(String(document.term || "")))
+      .filter((term): term is string => Boolean(term)))];
+  } catch {
+    return [];
+  }
+}
+
+async function createReportedFilterTerm(databases: Databases, normalizedTerm: string): Promise<void> {
+  try {
+    await databases.createDocument(
+      APPWRITE_DATABASE_ID,
+      APPWRITE_FILTER_TERMS_COLLECTION_ID,
+      getFilterTermDocumentId(normalizedTerm),
+      {
+        term: normalizedTerm,
+        createdAt: Date.now(),
+      },
+      [
+        Permission.read(Role.any()),
+        Permission.update(Role.any()),
+        Permission.delete(Role.any()),
+      ],
+    );
+  } catch (error) {
+    if (!isConflictError(error)) {
+      throw error;
+    }
+  }
+}
+
+function getFilterTermDocumentId(term: string): string {
+  return `term_${hashString(term)}`;
+}
+
+function hashString(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function isConflictError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && Number((error as { code?: unknown }).code) === 409;
+}
+
 function parseState(document: RoomDocument): GameStateSnapshot {
   return JSON.parse(document.stateJson) as GameStateSnapshot;
 }
 
-function cleanPlayerName(value?: string): string {
+function cleanPlayerName(value?: string, reportedFilterTerms: readonly string[] = []): string {
   const name = String(value || "").trim().replace(/\s+/g, " ").slice(0, 24);
-  return filterChatText(name) === name ? name : "";
+  if (!name) {
+    return "";
+  }
+
+  return filterChatText(name, { extraPhrases: [...RESERVED_PLAYER_NAMES, ...reportedFilterTerms] }) === name ? name : "";
 }
 
 function cleanCustomColor(value: unknown, fallback: string): string {
