@@ -16,6 +16,7 @@
     "@colyseus/schema": "^4.0.19",
     "@colyseus/sdk": "^0.17.39",
     "@colyseus/ws-transport": "^0.17.13",
+    "appwrite": "^25.0.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "react": "^19.2.0",

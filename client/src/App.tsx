@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, Dispatch, FormEvent, MutableRefObject, SetStateAction } from "react";
-import { Client, type Room } from "@colyseus/sdk";
 import {
   COLOR_META,
   DEFAULT_TURN_TIME_LIMIT_MS,
@@ -13,6 +12,7 @@ import {
 } from "../../shared/src/constants";
 import type { ChatMessage, GameMode, GameStateSnapshot, PlayerColor, PlayerState } from "../../shared/src/types";
 import { boardAsset, musicAssets, pieceAssets, soundAssets } from "./assets";
+import { AppwriteGameClient, type AppwriteRoom } from "./appwriteTransport";
 import { Board, type CaptureMarker, type PieceMoveAnimation } from "./Board";
 import { getPieceAssetForColor, useTintedPieceAssets } from "./pieceTint";
 
@@ -169,12 +169,12 @@ const DEFAULT_PLAYER_PREFERENCES: PlayerPreferences = {
 };
 
 export function App() {
-  const clientRef = useRef<Client | null>(null);
+  const clientRef = useRef<AppwriteGameClient | null>(null);
   const moveTimeoutRef = useRef<number | null>(null);
   const moveAnimationTimeoutRef = useRef<number | null>(null);
   const stepSoundTimeoutsRef = useRef<number[]>([]);
   const captureMarkerTimeoutsRef = useRef<number[]>([]);
-  const [room, setRoom] = useState<Room | null>(null);
+  const [room, setRoom] = useState<AppwriteRoom | null>(null);
   const [state, setState] = useState<GameStateSnapshot | null>(null);
   const [playerName, setPlayerName] = useState(() => getSavedPlayerNameCookie() || createRandomPlayerName());
   const [hasCustomPlayerName, setHasCustomPlayerName] = useState(() => Boolean(getSavedPlayerNameCookie()));
@@ -336,6 +336,18 @@ export function App() {
     }
   }, [state?.settings.chatFilterEnabled]);
 
+  useEffect(() => {
+    const activePlayer = state ? state.players[state.currentPlayerIndex] : undefined;
+    if (!room || !state || state.hostId !== room.sessionId || !activePlayer?.isBot || state.status !== "playing") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void room.playHostAutomation();
+    }, 720);
+    return () => window.clearTimeout(timeoutId);
+  }, [room, state]);
+
   async function createRoom(gameMode: GameMode) {
     setBusy(true);
     setErrorMessage("");
@@ -393,7 +405,7 @@ export function App() {
     }
   }
 
-  function attachRoom(joinedRoom: Room) {
+  function attachRoom(joinedRoom: AppwriteRoom) {
     room?.leave();
     setRoom(joinedRoom);
     setJoinCode(joinedRoom.roomId);
@@ -1659,7 +1671,7 @@ function AdminDock({
   targetPlayerId,
   onTargetPlayer,
 }: {
-  room: Room;
+  room: AppwriteRoom;
   state: GameStateSnapshot;
   meId: string;
   targetPlayerId: string;
@@ -2677,27 +2689,12 @@ function secondsToMs(value: unknown): number {
   return clampTurnTimeSeconds(value) * 1000;
 }
 
-function getClient(clientRef: MutableRefObject<Client | null>): Client {
+function getClient(clientRef: MutableRefObject<AppwriteGameClient | null>): AppwriteGameClient {
   if (!clientRef.current) {
-    clientRef.current = new Client(getServerUrl());
+    clientRef.current = new AppwriteGameClient();
   }
 
   return clientRef.current;
-}
-
-function getServerUrl(): string {
-  const configuredUrl = import.meta.env.VITE_COLYSEUS_URL as string | undefined;
-  if (configuredUrl) {
-    return configuredUrl;
-  }
-
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const localHosts = new Set(["localhost", "127.0.0.1", "0.0.0.0"]);
-  if (localHosts.has(window.location.hostname)) {
-    return `${protocol}://${window.location.hostname}:2567`;
-  }
-
-  return `${protocol}://${window.location.host}`;
 }
 
 function getStartBlocker(state: GameStateSnapshot): string {
